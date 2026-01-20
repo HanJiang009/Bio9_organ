@@ -1,0 +1,16 @@
+{
+    "app_name": "类器官样本库管理系统",
+    "debug": true,
+    "server": {
+      "host": "0.0.0.0",
+      "port": 8055
+    },
+    "jwt_secret": "53F463CD-87E5-0B60-DC9D-D9D61154812E",
+    "jwt_exp_minutes": 10080,
+  "upload_dir": "uploads",
+  "templates_dir": "app/templates",
+    "logs_dir": "logs",
+    "log_level": "INFO",
+    "request_log": true,
+    "sql_log": true
+}

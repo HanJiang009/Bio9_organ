@@ -1,0 +1,7 @@
+# 忽略敏感文件
+secret.key
+license.key
+*.key
+
+# 允许示例文件
+!*.example

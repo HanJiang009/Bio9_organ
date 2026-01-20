@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 环境变量和配置
+.env
+.env.local
+*.key
+secret.key
+license.key
+
+# 日志文件
+*.log
+
+# 数据库
+*.db
+*.sqlite
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.temp
+
+# 打包文件
+*.zip
+
+# 文档
+*.md
+
+# 文档目录
+docs/
+
+# 上传文件目录
+uploads/
+
+# SQL脚本目录
+sql/
+
+# 脚本目录
+scripts/
+
+# 临时文件
+temp/
+tmp/
+*.tmp
+
+# 备份文件
+*.bak
+*.backup

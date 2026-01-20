@@ -1,0 +1,95 @@
+{
+  "template_code": "S32421",
+  "name": "样本情况质量控制表",
+  "version": "1.0.0",
+  "total": "sum",
+  "items": [
+    {
+      "key": "lesion_feature",
+      "label": "病灶特征",
+      "source": "YBZJ.F_BZTZ",
+      "type": "enum",
+      "rules": [
+        { "match": ["转移灶", "转移性"], "score": 15 },
+        { "match": ["原发灶", "原发性"], "score": 10 },
+        { "match": ["恶性积液"], "score": 10 }
+      ],
+      "default_score": 0
+    },
+    {
+      "key": "sampling_method",
+      "label": "取样方式",
+      "source": "BBXX.F_QYFS",
+      "type": "enum",
+      "rules": [
+        { "match": ["手术取样", "术中取样"], "score": 15 },
+        { "match": ["穿刺取活", "穿刺活检"], "score": 10 },
+        { "match": ["内窥镜采集", "胃镜", "肠镜"], "score": 10 }
+      ],
+      "default_score": 0
+    },
+    {
+      "key": "amount_or_volume",
+      "label": "样本质量/体积",
+      "source": "YCL.F_YBZLTJ",
+      "type": "enum",
+      "rules": [
+        { "match": ["> 0.5g或200ml", ">0.5g或200ml"], "score": 20 },
+        { "match": ["0.2~0.5g或50~200ml"], "score": 15 },
+        { "match": ["<0.2g或50ml", "< 0.2g或50ml"], "score": 10 }
+      ],
+      "default_score": 0
+    },
+    {
+      "key": "tumor_cell_ratio",
+      "label": "样本中肿瘤细胞占比",
+      "source": "YCL.F_ZLXBZB",
+      "type": "enum",
+      "rules": [
+        { "match": ["> 40%", ">40%"], "score": 20 },
+        { "match": ["10%-40%", "10%~40%"], "score": 15 },
+        { "match": ["< 10%", "<10%"], "score": 5 },
+        { "match": ["几乎无"], "score": 0 }
+      ],
+      "default_score": 0
+    },
+    {
+      "key": "ex_vivo_time",
+      "label": "样本离体时间(小时)",
+      "source": "YCL.F_LTSJ",
+      "type": "expr",
+      "rules": [
+        { 
+          "when": "parse_dt(data.get('YCL', {}).get('F_LTSJ')) and parse_dt(data.get('YCL', {}).get('F_KSCLSJ')) and (parse_dt(data.get('YCL', {}).get('F_KSCLSJ')) - parse_dt(data.get('YCL', {}).get('F_LTSJ'))).total_seconds() / 3600 < 12",
+          "label": "< 12",
+          "score": 15 
+        },
+        { 
+          "when": "parse_dt(data.get('YCL', {}).get('F_LTSJ')) and parse_dt(data.get('YCL', {}).get('F_KSCLSJ')) and 12 <= (parse_dt(data.get('YCL', {}).get('F_KSCLSJ')) - parse_dt(data.get('YCL', {}).get('F_LTSJ'))).total_seconds() / 3600 < 24",
+          "label": "12-24",
+          "score": 5 
+        },
+        { 
+          "when": "parse_dt(data.get('YCL', {}).get('F_LTSJ')) and parse_dt(data.get('YCL', {}).get('F_KSCLSJ')) and 24 <= (parse_dt(data.get('YCL', {}).get('F_KSCLSJ')) - parse_dt(data.get('YCL', {}).get('F_LTSJ'))).total_seconds() / 3600 < 48",
+          "label": "24-48",
+          "score": 0 
+        }
+      ],
+      "default_score": 0
+    },
+    {
+      "key": "post_process_viability",
+      "label": "处理后细胞活力(%)",
+      "source": "YCL.F_XBHL",
+      "type": "enum",
+      "rules": [
+        { "match": ["> 50%", ">50%"], "score": 20 },
+        { "match": ["15%-50%"], "score": 15 },
+        { "match": ["< 15%", "<15%"], "score": 5 },
+        { "match": ["几乎无"], "score": 0 }
+      ],
+      "default_score": 0
+    }
+  ]
+}
+

@@ -1,0 +1,26 @@
+{
+    "database_type": "dameng", 
+    "sqlserver": {
+      "server": "demo.51syf.com",
+      "port": 1433,
+      "database": "biobankOG",
+      "username": "biobank",
+      "password": "4s3c2a1p",
+      "driver": "ODBC Driver 17 for SQL Server",
+      "encrypt": "no",
+      "trust_server_certificate": true,
+      "timeout": 30
+    },
+    "dameng": {
+      "host": "localhost",
+      "port": 5236,
+      "user": "SYSDBA",
+      "password": "EDMDZhang901005",
+      "database": "biobankOG",
+      "schema": "biobankOG",
+      "driver": "DM8 ODBC DRIVER",
+      "charset": "UTF-8",
+      "description": "DM config"
+    }
+  }
+

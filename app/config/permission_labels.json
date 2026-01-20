@@ -1,0 +1,23 @@
+{
+  "root_id": "organbank",
+  "labels": {
+    "organbank": "类器官样本库管理系统",
+    "sample_receive": "样本接收",
+    "organoid_culture_tissue": "组织细胞培养",
+    "organoid_culture_blood": "血液细胞培养",
+    "organoid_qc": "类器官质控",
+    "organoid_identification": "类器官鉴定",
+    "drug_assay": "药物实验",
+    "reports": "统计报表",
+    "qc_review": "质控审核",
+    "sample_linkage": "样本关联",
+    "transport_mgmt": "运输管理",
+    "drug_mgmt": "药物管理",
+    "antibody_mgmt": "抗体管理",
+    "user_mgmt": "用户管理",
+    "role_mgmt": "角色管理",
+    "unified_search": "综合查询",
+    "op_log": "日志管理"
+  }
+}
+

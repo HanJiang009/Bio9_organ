@@ -1,0 +1,21 @@
+ {"id": "organbank", 
+    "label": "类器官样本库管理系统", 
+    "children": [
+    {"id": "sample_receive", "label": "样本接收", "hasPermission": true, "shortcut": false},
+    {"id": "organoid_culture_tissue","label": "组织细胞培养", "hasPermission": true, "shortcut": false},
+    {"id": "organoid_culture_blood","label": "血液细胞培养", "hasPermission": true, "shortcut": false},
+    {"id": "organoid_qc", "label": "类器官质控", "hasPermission": true, "shortcut": false},
+    {"id": "organoid_identification", "label": "类器官鉴定", "hasPermission": true, "shortcut": false},
+    {"id": "drug_assay", "label": "药物实验", "hasPermission": true, "shortcut": false},
+    {"id": "reports", "label": "统计报表", "hasPermission": true, "shortcut": false},
+    {"id": "qc_review", "label": "质控审核", "hasPermission": true, "shortcut": false},
+    {"id": "sample_linkage", "label": "样本关联", "hasPermission": true, "shortcut": false},
+    {"id": "transport_mgmt", "label": "运输管理", "hasPermission": true, "shortcut": false},
+    {"id": "drug_mgmt", "label": "药物管理", "hasPermission": true, "shortcut": false},
+    {"id": "antibody_mgmt", "label": "抗体管理", "hasPermission": true, "shortcut": false},
+    {"id": "user_mgmt", "label": "用户管理", "hasPermission": true, "shortcut": false},
+    {"id": "role_mgmt", "label": "角色管理", "hasPermission": true, "shortcut": false},
+    {"id": "unified_search", "label": "综合查询", "hasPermission": true, "shortcut": false},
+    {"id": "op_log", "label": "日志管理", "hasPermission": true, "shortcut": false}
+    ]
+}
