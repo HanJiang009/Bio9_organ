@@ -94,7 +94,11 @@ def format_observation_data(observations: List[Dict[str, Any]]) -> List[Dict[str
         gcjl_data.append({
             "F_GCSJ": gcsj,
             "F_FJ": fj_text,
-            "F_PYJZT": obs.get("F_PYJZT") or "完好",
+            "F_PYJZT": (
+                ", ".join(str(x) for x in obs.get("F_PYJZT") if x)
+                if isinstance(obs.get("F_PYJZT"), list)
+                else (obs.get("F_PYJZT") or "完好")
+            ),
             "F_XBZT": obs.get("F_XBZT") or "",
             "F_SFHY": sfhy,
             "F_HYJL": obs.get("F_HYJL") or "",
@@ -352,7 +356,7 @@ def assemble_culture_detail_context(gdid: int) -> Dict[str, Any]:
         "PYMX_FJ": "有" if (pymx and pymx.get("F_FJ") and len(pymx.get("F_FJ", [])) > 0) else "",
         
         # 传代前信息
-        "PYMX_CDQ_XBMD": pymx.get("cdqxx", {}).get("F_CDQ_XBMD") if pymx else "",
+        "PYMX_CDQXBZS": pymx.get("cdqxx", {}).get("F_CDQXBZS") if pymx else "",
         "PYMX_CDQ_XBHL": pymx.get("cdqxx", {}).get("F_CDQ_XBHL") if pymx else "",
         "PYMX_CDQ_JZMD": pymx.get("cdqxx", {}).get("F_JZMD") if pymx else "",
         

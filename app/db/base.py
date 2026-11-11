@@ -15,3 +15,9 @@ class DatabaseAdapter(Protocol):
     def subquery_limit1(self, select_expr: str, from_clause: str, where_clause: str, order_by: str) -> str:
         """生成取第一条记录的子查询 SQL(跨数据库兼容)"""
         ...
+    def now(self) -> str:
+        """返回当前时间的 SQL 表达式（跨数据库兼容）"""
+        ...
+    def last_insert_id(self, cursor) -> int | None:
+        """在同一游标上获取最近一次 INSERT 的自增 ID"""
+        ...

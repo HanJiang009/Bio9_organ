@@ -28,14 +28,15 @@ def list_qc_culture_orders(payload: CultureOrderListQuery, current_user: dict = 
     获取类器官质控培养工单列表
     
     相比普通培养工单列表，额外返回质控相关字段：
-    - F_ZQTYS: 知情同意书 (来自T_YBZJ.F_ZQTYS)
+    - F_ZQTYS: 知情同意书 (来自T_YBZJ.F_ZQTYS；若为空但已上传文件则显示「是」)
     - F_LTSJ: 离体时间 (来自T_YCL.F_LTSJ)
     - F_KSCLSJ: 开始处理时间 (来自T_YCL.F_KSCLSJ，预处理信息)
     - F_JSZK: 接收质控PDF (来自T_YBZJ.F_PDF)
     - F_YBZLPFB: 样本质量评分表PDF (来自T_YCL.F_PDF)
     - F_LQGZK: 类器官质控PDF (来自T_ZKJL.F_PDF)
     - F_LQGFX: 类器官放行报告PDF (来自T_ZKJL.F_PDF_FXJC)
-    - F_YWSYBG: 药物试验报告PDF (暂时为null，待药物试验模块开发)
+    - F_YWSYBG: 药物实验报告PDF (来自T_SYJH.F_BG_PDF，关联最新实验计划)
+    - F_DWSYBG: 动物实验报告PDF (来自T_DWSY_JH.F_BG_PDF，关联最新实验计划)
     - F_SYCLSX: 剩余处理时效（小时）= 48 - (F_KSCLSJ或当前时间 - F_LTSJ)
     
     新增筛选条件：
@@ -83,6 +84,8 @@ def list_qc_culture_orders(payload: CultureOrderListQuery, current_user: dict = 
                     "F_QYFS": "取样方式",
                     "F_YBLY": "样本来源",
                     "F_YBGG": "样本规格",
+                    "F_CDQXBZS": "传代前细胞总数",
+                    "F_FSQXBZS": "复苏前细胞总数",
                     "F_SQR": "申请人",
                     "F_PYSJ": "培养时间",
                     "F_FJ": [],  // 附件列表
@@ -116,7 +119,14 @@ def list_qc_culture_orders(payload: CultureOrderListQuery, current_user: dict = 
                         "generated": 文件ID或null,
                         "uploaded": []
                     },
-                    "F_YWSYBG": null,  // 药物试验报告PDF（暂未开发）
+                    "F_YWSYBG": {  // 药物试验报告PDF（来自实验计划）
+                        "generated": {
+                            "file_id": 2456,
+                            "filename": "药物试验报告_20.pdf",
+                            "url": "drug_test_report/xxx.pdf"
+                        },
+                        "uploaded": []
+                    },
                     "F_SYCLSX": 35.5  // 剩余处理时效（小时），48小时内剩余时间
                 }
             ],
@@ -126,20 +136,19 @@ def list_qc_culture_orders(payload: CultureOrderListQuery, current_user: dict = 
         }
     }
     """
-    user_ktype = None
-    try:
-        user_ktype = str(current_user.get("F_Ktype")) if current_user and current_user.get("F_Ktype") is not None else None
-    except Exception:
-        user_ktype = None
-    
-    data = crud.list_qc_culture_orders(payload.model_dump(), user_ktype=user_ktype)
+    from app.core.data_scope import resolve_data_scope
+    data = crud.list_qc_culture_orders(
+        payload.model_dump(),
+        user=current_user,
+        scope=resolve_data_scope(current_user, "organoid_qc"),
+    )
     return ok(data, f"查询成功，共 {data.get('total', 0)} 条")
 
 
 @router.post("/upload", response_model=ApiResponse[Dict[str, Any]], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["organoid_qc"]))])
 async def upload_qc_file_api(
-    F_ZKJD: str = Form(..., description="质控阶段（知情同意书、接收质控、样本质量评分表、类器官质控、类器官放行报告、药物试验报告）"),
+    F_ZKJD: str = Form(..., description="质控阶段（知情同意书、接收质控、样本质量评分表、类器官质控、类器官放行报告、药物实验报告、动物实验报告）"),
     F_FJ: List[UploadFile] = File(..., description="上传的文件列表"),
     F_GDID: int | None = Form(None, description="工单ID（与F_GDBH/F_ZZID三选一）"),
     F_GDBH: str | None = Form(None, description="工单编号（与F_GDID/F_ZZID三选一）"),
@@ -160,7 +169,8 @@ async def upload_qc_file_api(
     - 样本质量评分表（必须用F_GDID或F_GDBH）
     - 类器官质控（必须用F_GDID或F_GDBH）
     - 类器官放行报告（必须用F_GDID或F_GDBH）
-    - 药物试验报告（暂未开发）
+    - 药物实验报告（必须用F_GDID或F_GDBH）
+    - 动物实验报告（必须用F_GDID或F_GDBH）
     
     **请求示例1（使用工单ID）：**
     ```
@@ -251,42 +261,44 @@ async def upload_qc_file_api(
 
 @router.post("/upload-logs", response_model=ApiResponse[Dict[str, Any]], response_model_exclude_none=False,
              dependencies=[Depends(require_roles(["organoid_qc"]))])
-def get_upload_logs_api(
-    F_ZZID: str | None = Form(None, description="标本号（使用标本号时仅返回知情同意书和接收质控）"),
-    F_GDBH: str | None = Form(None, description="工单号"),
-    F_GDID: int | None = Form(None, description="工单ID"),
-    F_ZKJD: str | None = Form(None, description="质控阶段"),
-    skip: int = Form(0, description="跳过记录数"),
-    limit: int = Form(50, description="返回记录数")
-):
+async def get_upload_logs_api(request: Request):
     """
     查询质控上传日志
-    
+
+    **支持两种请求格式：**
+    1. JSON格式（推荐）：`Content-Type: application/json`
+    2. form-data格式：`Content-Type: application/x-www-form-urlencoded`
+
+    > 注意：早期版本仅支持 form-data 格式，若请求以 JSON 方式发送，参数会被静默忽略，
+    > 导致查询条件全部失效并返回全表数据。现已修复为自动识别请求的 Content-Type。
+
     **参数说明：**
     - 使用 F_ZZID（标本号）查询时，自动过滤只返回"知情同意书"和"接收质控"两个阶段的记录
     - 使用 F_GDID 或 F_GDBH 查询时，返回所有阶段的记录
     - 可以同时使用 F_ZKJD 指定质控阶段进行进一步过滤
-    
-    **请求示例1（工单号查询）：**
+
+    **请求示例1（JSON格式，工单号查询）：**
+    ```json
+    POST /organoid-qc/upload-logs
+    Content-Type: application/json
+
+    {
+        "F_GDBH": "S234332320251103P020251111155334",
+        "skip": 0,
+        "limit": 50
+    }
+    ```
+
+    **请求示例2（form-data格式，标本号查询，自动过滤阶段）：**
     ```
     POST /organoid-qc/upload-logs
     Content-Type: application/x-www-form-urlencoded
-    
-    F_GDBH: S234332320251103P020251111155334
-    skip: 0
-    limit: 50
-    ```
-    
-    **请求示例2（标本号查询，自动过滤阶段）：**
-    ```
-    POST /organoid-qc/upload-logs
-    Content-Type: application/x-www-form-urlencoded
-    
+
     F_ZZID: S234332320251103
     skip: 0
     limit: 50
     ```
-    
+
     **响应示例：**
     ```json
     {
@@ -320,13 +332,45 @@ def get_upload_logs_api(
         }
     }
     ```
-    
+
     **字段说明：**
     - `F_FJ`: 附件列表，包含文件ID、原始文件名和存储路径
       - `id`: 文件ID
       - `name`: 原始文件名
       - `path`: 文件存储路径（相对路径，可直接用于构建下载URL）
     """
+    # 根据 Content-Type 解析请求数据，兼容 JSON 与 form-data 两种格式
+    content_type = request.headers.get("content-type", "").lower()
+    try:
+        if "application/json" in content_type:
+            body = await request.json()
+        else:
+            form_data = await request.form()
+            body = dict(form_data)
+    except Exception as e:
+        return err(f"请求参数解析失败: {str(e)}")
+
+    def _to_int(v, default=None):
+        if v is None or v == "":
+            return default
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    def _to_str(v):
+        if v is None:
+            return None
+        v = str(v).strip()
+        return v or None
+
+    F_ZZID = _to_str(body.get("F_ZZID"))
+    F_GDBH = _to_str(body.get("F_GDBH"))
+    F_GDID = _to_int(body.get("F_GDID"))
+    F_ZKJD = _to_str(body.get("F_ZKJD"))
+    skip = _to_int(body.get("skip"), 0)
+    limit = _to_int(body.get("limit"), 50)
+
     try:
         data = qc_upload.get_upload_logs(
             zzid=F_ZZID,

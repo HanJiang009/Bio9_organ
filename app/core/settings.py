@@ -5,7 +5,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict
 import json
+import os
 import sys
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # 无 Agent 交付可不装
+    load_dotenv = None
 
 @dataclass
 class ServerSettings:
@@ -39,6 +45,14 @@ class Settings:
     request_log: bool = True
     # 数据库 SQL 日志
     sql_log: bool = False  # 是否输出 SQL 执行日志（用于调试）
+    # 智能体（默关；ORGAN_AGENT_ENABLED 优先于 settings.json）
+    agent_enabled: bool = False
+    agent_data_dir: str = "data/agent"
+    agent_extractor: str = "auto"
+    agent_llm_base_url: str = "https://api.deepseek.com/v1"
+    agent_llm_model: str = "deepseek-chat"
+    agent_llm_timeout: int = 60
+    agent_llm_api_key: str = ""
 
 def load_settings() -> Settings:
     """从 settings.json 读取配置并与默认值合并，返回 Settings 实例。
@@ -61,7 +75,7 @@ def load_settings() -> Settings:
     cfg_path = base_dir / "config" / "settings.json"
     
     if cfg_path.exists():
-        with cfg_path.open("r", encoding="utf-8") as f:
+        with cfg_path.open('r', encoding='utf-8-sig') as f:
             data = json.load(f)
 
     server_raw = data.get("server", {})
@@ -77,6 +91,11 @@ def load_settings() -> Settings:
     else:
         # 开发环境：Bio9_organ 仓库根目录
         project_root = Path(__file__).resolve().parents[2]
+
+    if load_dotenv:
+        env_file = project_root / ".env"
+        if env_file.exists():
+            load_dotenv(env_file, override=False)
     
     # 处理目录路径,转换为绝对路径
     upload_dir_raw = data.get("upload_dir", Settings.upload_dir)
@@ -87,7 +106,42 @@ def load_settings() -> Settings:
     
     logs_dir_raw = data.get("logs_dir", Settings.logs_dir)
     logs_dir = str(project_root / logs_dir_raw) if not Path(logs_dir_raw).is_absolute() else logs_dir_raw
-    
+
+    agent_raw = data.get("agent") or {}
+    env_flag = os.getenv("ORGAN_AGENT_ENABLED")
+    if env_flag is not None and env_flag.strip() != "":
+        agent_enabled = env_flag.strip().lower() not in {"0", "false", "no", "off"}
+    else:
+        agent_enabled = bool(agent_raw.get("enabled", False))
+    agent_data_dir_raw = agent_raw.get("data_dir", Settings.agent_data_dir)
+    agent_data_dir = (
+        str(project_root / agent_data_dir_raw)
+        if not Path(agent_data_dir_raw).is_absolute()
+        else agent_data_dir_raw
+    )
+    llm_raw = agent_raw.get("llm") or {}
+    agent_extractor = (
+        os.getenv("ORGAN_AGENT_EXTRACTOR")
+        or agent_raw.get("extractor")
+        or Settings.agent_extractor
+    )
+    agent_llm_base_url = (
+        os.getenv("ORGAN_AGENT_LLM_BASE_URL")
+        or llm_raw.get("base_url")
+        or Settings.agent_llm_base_url
+    )
+    agent_llm_model = (
+        os.getenv("ORGAN_AGENT_LLM_MODEL")
+        or llm_raw.get("model")
+        or Settings.agent_llm_model
+    )
+    timeout_raw = os.getenv("ORGAN_AGENT_LLM_TIMEOUT") or llm_raw.get("timeout") or Settings.agent_llm_timeout
+    try:
+        agent_llm_timeout = int(timeout_raw)
+    except (TypeError, ValueError):
+        agent_llm_timeout = Settings.agent_llm_timeout
+    agent_llm_api_key = (os.getenv("ORGAN_AGENT_LLM_API_KEY") or "").strip()
+
     return Settings(
         app_name=data.get("app_name", Settings.app_name),
         debug=bool(data.get("debug", Settings.debug)),
@@ -100,6 +154,13 @@ def load_settings() -> Settings:
         log_level=data.get("log_level", Settings.log_level),
         request_log=bool(data.get("request_log", Settings.request_log)),
         sql_log=bool(data.get("sql_log", Settings.sql_log)),
+        agent_enabled=agent_enabled,
+        agent_data_dir=agent_data_dir,
+        agent_extractor=str(agent_extractor or "auto").strip().lower(),
+        agent_llm_base_url=str(agent_llm_base_url).strip(),
+        agent_llm_model=str(agent_llm_model).strip(),
+        agent_llm_timeout=agent_llm_timeout,
+        agent_llm_api_key=agent_llm_api_key,
     )
 
 # 加载全局配置实例，供其他模块直接导入使用

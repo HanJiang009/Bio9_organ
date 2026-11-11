@@ -51,7 +51,7 @@ def init_config_files():
                 if source_file.suffix == '.json':
                     # JSON 文件：读取后重新写入，确保 UTF-8 编码
                     import json
-                    data = json.loads(source_file.read_text(encoding='utf-8'))
+                    data = json.loads(source_file.read_text(encoding='utf-8-sig'))
                     target_file.write_text(
                         json.dumps(data, ensure_ascii=False, indent=2),
                         encoding='utf-8'

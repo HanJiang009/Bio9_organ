@@ -12,8 +12,7 @@ from app.core.auth import require_roles
 router = APIRouter(prefix="/users", tags=["users"])
 
 #获取用户列表
-@router.post("/list", response_model=ApiResponse[List[UserOut]], response_model_exclude_none=True,
-             dependencies=[Depends(require_roles(["user_mgmt"]))])
+@router.post("/list", response_model=ApiResponse[List[UserOut]], response_model_exclude_none=True)
 def list_users(payload: UserListQuery):
     # 兼容新/旧字段名与空入参：
     # - 新：F_YSM, F_Ktype, F_ZT

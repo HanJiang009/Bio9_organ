@@ -11,9 +11,8 @@ import json
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-import pythoncom
-import win32com.client
 
+from app.core.docx_pdf import convert_docx_to_pdf
 from app.core.settings import settings
 from app.crud.file_center import insert_file_record
 from app.crud.sample_receive_report import assemble_sample_receive_report
@@ -263,23 +262,9 @@ def generate_sample_receive_pdf(F_ZZID: str) -> Dict[str, Any]:
     print(f"开始PDF转换: {temp_docx_path} -> {pdf_path}")
     
     try:
-        # 初始化COM
-        pythoncom.CoInitialize()
-        
-        # 使用Word COM对象转换
-        word = win32com.client.Dispatch("Word.Application")
-        word.Visible = False
-        word.DisplayAlerts = False
-        
-        try:
-            doc_com = word.Documents.Open(str(temp_docx_path.absolute()))
-            doc_com.SaveAs(str(pdf_path.absolute()), FileFormat=17)  # 17 = wdFormatPDF
-            doc_com.Close()
-            print(f"PDF转换成功: {pdf_path}")
-        finally:
-            word.Quit()
-            pythoncom.CoUninitialize()
-        
+        convert_docx_to_pdf(temp_docx_path, pdf_path)
+        print(f"PDF转换成功: {pdf_path}")
+
         # 8. 移动PDF到uploads目录
         uploads_dir = Path(settings.upload_dir)
         
@@ -291,8 +276,7 @@ def generate_sample_receive_pdf(F_ZZID: str) -> Dict[str, Any]:
         pdf_path.rename(final_pdf_path)
         
         # 计算相对路径
-        project_root = base_dir.parent
-        relative_path = str(final_pdf_path.relative_to(project_root))
+        relative_path = str(final_pdf_path.relative_to(uploads_dir)).replace("\\", "/")
         
         # 9. 注册到文件中心
         file_id = insert_file_record(
@@ -335,8 +319,7 @@ def generate_sample_receive_pdf(F_ZZID: str) -> Dict[str, Any]:
         docx_uploads_path = docx_dir / temp_docx_name
         temp_docx_path.rename(docx_uploads_path)
         
-        project_root = base_dir.parent
-        relative_path = str(docx_uploads_path.relative_to(project_root))
+        relative_path = str(docx_uploads_path.relative_to(uploads_dir)).replace("\\", "/")
         file_id = insert_file_record(
             path=relative_path,
             original_name=temp_docx_name

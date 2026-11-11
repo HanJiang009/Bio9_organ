@@ -21,13 +21,15 @@ from app.crud.file_center import get_file_by_id
 from app.db.factory import get_adapter
 
 
-def check_report_conditions(gdid: int) -> tuple[bool, str]:
+def check_report_conditions(gdid: int, *, allow_unqualified: bool = False) -> tuple[bool, str]:
     """
     检查工单是否满足生成报告的条件
-    
+
     Args:
         gdid: 工单ID
-        
+        allow_unqualified: 培养详情查看时，培养或观察阶段已标为不合格、
+            尚未提交验证单的工单也允许生成。放行检测报告不放开。
+
     Returns:
         (是否允许生成, 状态信息)
     """
@@ -48,10 +50,14 @@ def check_report_conditions(gdid: int) -> tuple[bool, str]:
         # 允许的质控状态
         allowed_zkzt = ["待审核", "审核通过", "审核不通过"]
         
-        if zkzt not in allowed_zkzt:
-            return False, f"工单质控状态为'{zkzt}'，需要先提交质控单"
-        
-        return True, f"质控状态: {zkzt}, 工单状态: {gdzt}"
+        if zkzt in allowed_zkzt:
+            return True, f"质控状态: {zkzt}, 工单状态: {gdzt}"
+
+        # 培养/观察阶段标不合格时还没有验证单，质控状态为空，查看详情仍应出 PDF
+        if allow_unqualified and gdzt in ("不合格", "不合格审批中"):
+            return True, f"工单状态: {gdzt}，质控状态: {zkzt or '未提交'}"
+
+        return False, f"工单质控状态为'{zkzt}'，需要先提交质控单"
 
 
 def format_datetime_field(dt, fmt="%Y.%m.%d %H:%M") -> str:
@@ -166,12 +172,18 @@ def format_observation_records(gcjl_raw: List[Dict[str, Any]]) -> List[Dict[str,
             sfhy = "是"
         else:
             sfhy = ""
+
+        pyjzt = obs.get("F_PYJZT")
+        if isinstance(pyjzt, list):
+            pyjzt_fmt = ", ".join(str(x) for x in pyjzt if x) or "完好"
+        else:
+            pyjzt_fmt = pyjzt or "完好"
         
         gcjl_data.append({
             "T_GCJL.F_GCSJ": gcsj,
             "T_GCJL.F_GCSJ_FMT": gcsj_fmt,
             "T_GCJL.F_PYTS": obs.get("F_PYTS") or "",
-            "T_GCJL.F_PYJZT": obs.get("F_PYJZT") or "完好",
+            "T_GCJL.F_PYJZT": pyjzt_fmt,
             "T_GCJL.F_SFWR": obs.get("F_SFWR") or "",
             "T_GCJL.F_SFJY": obs.get("F_SFJY") or "",
             "T_GCJL.F_PJZJ": obs.get("F_PJZJ") or "",
@@ -284,12 +296,13 @@ def format_xhmsy_data(xhmsy_raw: Any) -> List[Dict[str, Any]]:
     return xhmsy_data
 
 
-def assemble_culture_detail_report(gdid: int) -> Dict[str, Any]:
+def assemble_culture_detail_report(gdid: int, *, allow_unqualified: bool = False) -> Dict[str, Any]:
     """
     组装培养工单详情的完整报告数据（嵌套JSON结构）
     
     Args:
         gdid: 工单ID
+        allow_unqualified: 不合格且尚未提交验证单时仍组装培养详情
         
     Returns:
         包含所有字段的报告数据字典（嵌套结构）
@@ -298,7 +311,7 @@ def assemble_culture_detail_report(gdid: int) -> Dict[str, Any]:
         ValueError: 工单不存在或状态不符合
     """
     # 0. 检查状态
-    can_generate, status_msg = check_report_conditions(gdid)
+    can_generate, status_msg = check_report_conditions(gdid, allow_unqualified=allow_unqualified)
     if not can_generate:
         raise ValueError(status_msg)
     
@@ -324,33 +337,36 @@ def assemble_culture_detail_report(gdid: int) -> Dict[str, Any]:
             yclxx["F_LTSJ"] = ltsj_from_ybzj
     
     # 格式化预处理附件URL
-    # 优先使用 F_YBYCL_URL（fetch_preprocess_by_gdid 已处理）
-    yclxx_fj_url = yclxx.get("F_YBYCL_URL") or ""
-    print(f"调试: 预处理图片 - F_YBYCL值: {yclxx.get('F_YBYCL')}, F_YBYCL_URL: {yclxx.get('F_YBYCL_URL')}")
+    # 注意：fetch_preprocess_by_gdid 实际产出的是 F_YBYCL_FILES（文件详情列表，含 path/name/id），
+    # 而不是 F_YBYCL_URL 或 F_FJ —— 之前这里一直读取两个不存在的字段，导致预处理图片URL永远为空，
+    # 报告里的样本预处理图片占位符也就始终无法被替换。
+    yclxx_fj_url = ""
+    ybycl_files = yclxx.get("F_YBYCL_FILES") or []
+    if isinstance(ybycl_files, list) and ybycl_files:
+        first_file = ybycl_files[0] or {}
+        path = first_file.get("path")
+        if path:
+            yclxx_fj_url = str(path)
     
-    # 如果 F_YBYCL_URL 为空，尝试从 F_FJ（JSON数组）获取
+    # 兜底：如果 F_YBYCL_FILES 未取到（如老数据/异常），直接从原始 F_YBYCL 字段解析文件ID获取URL
     if not yclxx_fj_url:
-        print(f"调试: F_YBYCL_URL为空，尝试从F_FJ获取")
-        yclxx_fj_field = yclxx.get("F_FJ")
-        if yclxx_fj_field:
-            # 如果是字符串，尝试解析JSON
-            if isinstance(yclxx_fj_field, str):
-                try:
-                    fj_list = json.loads(yclxx_fj_field)
-                except:
-                    fj_list = []
-            elif isinstance(yclxx_fj_field, list):
-                fj_list = yclxx_fj_field
-            else:
-                fj_list = []
-            
-            # 提取第一个文件的URL
-            if isinstance(fj_list, list) and len(fj_list) > 0:
-                first_fj = fj_list[0]
-                if isinstance(first_fj, dict):
-                    file_id = first_fj.get("F_WJ_ID")
-                    if file_id:
-                        yclxx_fj_url = get_file_url(file_id)
+        raw_ybycl = yclxx.get("F_YBYCL")
+        file_id = None
+        if isinstance(raw_ybycl, str):
+            try:
+                parsed = json.loads(raw_ybycl)
+                if isinstance(parsed, list) and parsed:
+                    file_id = parsed[0]
+                elif parsed:
+                    file_id = parsed
+            except Exception:
+                file_id = raw_ybycl
+        elif isinstance(raw_ybycl, list) and raw_ybycl:
+            file_id = raw_ybycl[0]
+        elif raw_ybycl:
+            file_id = raw_ybycl
+        if file_id:
+            yclxx_fj_url = get_file_url(file_id)
     
     # 确保URL以/开头
     if yclxx_fj_url and not yclxx_fj_url.startswith('/'):
@@ -419,6 +435,8 @@ def assemble_culture_detail_report(gdid: int) -> Dict[str, Any]:
             "F_QYFS": gdxx.get("F_QYFS") or "",
             "F_YBLY": gdxx.get("F_YBLY") or "",
             "F_YBGG": gdxx.get("F_YBGG") or "",
+            "F_CDQXBZS": gdxx.get("F_CDQXBZS") or "",
+            "F_FSQXBZS": gdxx.get("F_FSQXBZS") or "",
             "F_SQR": gdxx.get("F_SQR") or "",
             "F_PYSJ": format_datetime_field(gdxx.get("F_PYSJ")),
             "F_CJSJ": format_datetime_field(gdxx.get("F_CJSJ")),
@@ -459,7 +477,10 @@ def assemble_culture_detail_report(gdid: int) -> Dict[str, Any]:
                 "F_PYJ_SD": pymx.get("PYJTJJL", {}).get("F_PYJ_SD") or "",
             },
             "消化信息": {
-                "T_PYMX_ZZ.F_QXYCF": pymx.get("F_QXYCF") or "",
+                # 培养明细自身的清洗液成分（仅"传代-培养"/"复苏-培养"阶段有此字段）为空时，
+                # 回退使用预处理阶段（T_YCL.F_QXYCF）的清洗液成分，避免"原代-培养"等阶段
+                # 报告中该字段始终空白
+                "T_PYMX_ZZ.F_QXYCF": pymx.get("F_QXYCF") or yclxx.get("F_QXYCF") or "",
                 "F_MJFA": pymx.get("PYXX_XH", {}).get("F_MJFA") or "",
                 "F_ZZMJFA": pymx.get("PYXX_XH", {}).get("F_ZZMJFA") or "",
                 "F_SWKJ": pymx.get("PYXX_XH", {}).get("F_SWKJ") or "",
@@ -486,7 +507,7 @@ def assemble_culture_detail_report(gdid: int) -> Dict[str, Any]:
                 "F_PYX_FRSJ": format_datetime_field(pymx.get("PYXX_PY", {}).get("F_PYX_FRSJ")),
             },
             "传代前信息": {
-                "F_CDQ_XBMD": pymx.get("CDQXX", {}).get("F_CDQ_XBMD") or "",
+                "F_CDQXBZS": pymx.get("CDQXX", {}).get("F_CDQXBZS") or "",
                 "F_CDQ_XBHL": pymx.get("CDQXX", {}).get("F_CDQ_XBHL") or "",
                 "F_JZMD": pymx.get("CDQXX", {}).get("F_JZMD") or "",
             },

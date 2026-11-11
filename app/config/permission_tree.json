@@ -1,12 +1,16 @@
  {"id": "organbank", 
     "label": "类器官样本库管理系统", 
     "children": [
+    {"id": "home", "label": "首页", "hasPermission": true, "shortcut": false},
     {"id": "sample_receive", "label": "样本接收", "hasPermission": true, "shortcut": false},
     {"id": "organoid_culture_tissue","label": "组织细胞培养", "hasPermission": true, "shortcut": false},
+    {"id": "sample_inbound", "label": "样本入库", "hasPermission": true, "shortcut": false},
     {"id": "organoid_culture_blood","label": "血液细胞培养", "hasPermission": true, "shortcut": false},
     {"id": "organoid_qc", "label": "类器官质控", "hasPermission": true, "shortcut": false},
     {"id": "organoid_identification", "label": "类器官鉴定", "hasPermission": true, "shortcut": false},
+    {"id": "shortcut_workbenches", "label": "快捷工位", "hasPermission": true, "shortcut": false},
     {"id": "drug_assay", "label": "药物实验", "hasPermission": true, "shortcut": false},
+    {"id": "animal_experiment", "label": "动物实验", "hasPermission": true, "shortcut": false},
     {"id": "reports", "label": "统计报表", "hasPermission": true, "shortcut": false},
     {"id": "qc_review", "label": "质控审核", "hasPermission": true, "shortcut": false},
     {"id": "sample_linkage", "label": "样本关联", "hasPermission": true, "shortcut": false},
@@ -16,6 +20,17 @@
     {"id": "user_mgmt", "label": "用户管理", "hasPermission": true, "shortcut": false},
     {"id": "role_mgmt", "label": "角色管理", "hasPermission": true, "shortcut": false},
     {"id": "unified_search", "label": "综合查询", "hasPermission": true, "shortcut": false},
-    {"id": "op_log", "label": "日志管理", "hasPermission": true, "shortcut": false}
+    {"id": "wax_block_mgmt", "label": "蜡块管理", "hasPermission": true, "shortcut": false},
+    {"id": "pipeline", "label": "流水线", "hasPermission": true, "shortcut": false},
+    {"id": "pipeline_mgmt", "label": "流水线管理", "hasPermission": true, "shortcut": false},
+    {"id": "outbound_mgmt", "label": "出库管理", "hasPermission": true, "shortcut": false},
+    {"id": "container_mgmt", "label": "容器管理", "hasPermission": true, "shortcut": false},
+    {"id": "stock_audit", "label": "出入库审核", "hasPermission": true, "shortcut": false},
+    {"id": "shortcut_workstation", "label": "快捷工作台", "hasPermission": true, "shortcut": false},
+    {"id": "op_log", "label": "操作日志", "hasPermission": true, "shortcut": false},
+    {"id": "dict_mgmt", "label": "字典值管理", "hasPermission": true, "shortcut": false},
+    {"id": "box_mgmt", "label": "盒子管理", "hasPermission": true, "shortcut": false},
+    {"id": "sampling_standard", "label": "采集标准", "hasPermission": true, "shortcut": false},
+    {"id": "automated_dashboard", "label": "自动化看板", "hasPermission": true, "shortcut": false}
     ]
 }

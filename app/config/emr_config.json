@@ -1,0 +1,31 @@
+{
+  "enabled": false,
+  "url_template": "http://www.baidu.com/%sfzh",
+  "_comment": "url_template 一次只能使用 placeholders 里的一种占位符。部署时改 url_template 和 enabled 即可，一般不要改 placeholders。",
+  "placeholders": [
+    {
+      "token": "%zyh",
+      "field": "F_ZYH",
+      "label": "住院号",
+      "example": "http://emr.example.com/view?zyh=%zyh"
+    },
+    {
+      "token": "%brbh",
+      "field": "F_BRBH",
+      "label": "病人编号",
+      "example": "http://emr.example.com/view?brbh=%brbh"
+    },
+    {
+      "token": "%sfzh",
+      "field": "F_SFZH",
+      "label": "身份证号",
+      "example": "http://www.baidu.com/%sfzh"
+    },
+    {
+      "token": "%mzh",
+      "field": "F_MZH",
+      "label": "门诊号",
+      "example": "http://emr.example.com/view?mzh=%mzh"
+    }
+  ]
+}

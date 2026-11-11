@@ -2,11 +2,12 @@ from fastapi import FastAPI, Request
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from .core.response import PseudonymJSONResponse
 from .routers.health import router as health_router
 from .core.settings import settings
 from .core.logging import setup_logging
 from .core import exceptions
-from .core.middleware import RequestLogMiddleware
+from .core.middleware import RequestLogMiddleware, PseudonymMiddleware
 import logging
 import sys
 from pathlib import Path
@@ -18,16 +19,23 @@ if getattr(sys, 'frozen', False):
     base_path = Path(sys._MEIPASS)
     sys.path.insert(0, str(base_path))
 else:
-    # 开发环境：bio9_license 在 pywork 目录下
-    pywork_dir = Path(__file__).parent.parent.parent
-    sys.path.insert(0, str(pywork_dir))
+    # 开发/部署环境：向上逐级查找 bio9_license 所在目录，兼容不同部署路径
+    _found = False
+    for _parent in Path(__file__).resolve().parents:
+        if (_parent / 'bio9_license').exists():
+            sys.path.insert(0, str(_parent))
+            _found = True
+            break
+    if not _found:
+        # 兜底：保持原有的三级上溯
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 try:
     from bio9_license import LicenseGuard, create_license_middleware
     LICENSE_ENABLED = True
-except ImportError:
+except Exception as _e:
     LICENSE_ENABLED = False
-    logging.warning("⚠️  授权模块未找到，授权功能已禁用")
+    logging.warning(f"⚠️  授权模块加载失败: {_e}")
 
 logger = logging.getLogger(__name__)
 from .routers.user import router as user_router
@@ -47,20 +55,38 @@ from .routers.organoid_freeze import router as organoid_freeze_router
 from .routers.organoid_thaw import router as organoid_thaw_router
 from .routers.sample_linkage import router as sample_linkage_router
 from .routers.transport_mgmt import router as transport_mgmt_router
+from .routers.outbound_mgmt import router as outbound_mgmt_router
+from .routers.container_mgmt import router as container_mgmt_router
+from .routers.sample_inbound import router as sample_inbound_router
+from .routers.stock_audit import router as stock_audit_router
 from .routers.unified_search import router as unified_search_router
 from .routers.preprocess import router as preprocess_router
 from .routers.op_log import router as op_log_router
 from .routers.drug_mgmt import router as drug_mgmt_router
 from .routers.drug_test import router as drug_test_router
 from .routers.drug_test_result import router as drug_test_result_router
+from .routers.animal_test import router as animal_test_router
+from .routers.animal_test_record import router as animal_test_record_router
 from .routers.license import router as license_router
+from .routers.dict import router as dict_router
+from .routers.box_mgmt import router as box_mgmt_router
+from .routers.code_rule import router as code_rule_router
+from .routers.sampling_standard import router as sampling_standard_router
+from .routers.his_query import router as his_query_router
+from .routers.emr import router as emr_router
+from .routers.pipeline import router as pipeline_router
+from .routers.pipeline_progress import router as pipeline_progress_router
+from .routers.workstation import router as workstation_router
+from .routers.user_preferences import router as user_preferences_router
+from .routers.home import router as home_router
+from .routers.sys_setting import router as sys_setting_router
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 setup_logging("DEBUG" if settings.debug else "INFO")
 
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title=settings.app_name, default_response_class=PseudonymJSONResponse)
 
 # 🔐 初始化授权守卫（启动时执行）
 @app.on_event("startup")
@@ -81,11 +107,15 @@ async def startup_event():
             guard = LicenseGuard()
             guard.initialize(
                 system_name="Bio9_organ",
-                license_file=str(app_root / "config" / "license.key"),
-                secret_key_file=str(app_root / "config" / "secret.key")
+                license_file=str(app_root / "config" / "license.key")
             )
         except Exception as e:
             logger.error(f"❌ 授权系统初始化失败: {e}")
+    try:
+        from .crud.role import ensure_pseudonym_column
+        ensure_pseudonym_column()
+    except Exception as e:
+        logger.error(f"角色伪名化字段初始化失败: {e}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -108,6 +138,7 @@ if LICENSE_ENABLED:
         logger.error(f"❌ 授权中间件添加失败: {e}")
 
 app.add_middleware(RequestLogMiddleware)
+app.add_middleware(PseudonymMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
@@ -166,7 +197,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     cleaned_errors = [clean_error(err) for err in errors]
     
     # 返回标准的422响应
-    return JSONResponse(
+    return PseudonymJSONResponse(
         status_code=422,
         content={"detail": cleaned_errors}
     )
@@ -203,8 +234,34 @@ app.include_router(organoid_freeze_router)
 app.include_router(organoid_thaw_router)
 app.include_router(sample_linkage_router)
 app.include_router(transport_mgmt_router)
+app.include_router(outbound_mgmt_router)
+app.include_router(container_mgmt_router)
+app.include_router(sample_inbound_router)
+app.include_router(stock_audit_router)
 app.include_router(unified_search_router)
 app.include_router(drug_mgmt_router)
 app.include_router(drug_test_router)
 app.include_router(drug_test_result_router)
+app.include_router(animal_test_router)
+app.include_router(animal_test_record_router)
 app.include_router(license_router)
+app.include_router(dict_router)
+app.include_router(box_mgmt_router)
+app.include_router(code_rule_router)
+app.include_router(sampling_standard_router)
+app.include_router(his_query_router)
+app.include_router(emr_router)
+app.include_router(pipeline_router)
+app.include_router(pipeline_progress_router)
+app.include_router(workstation_router)
+app.include_router(user_preferences_router)
+app.include_router(home_router)
+app.include_router(sys_setting_router)
+# 智能体未完成交付：缺配置或缺依赖时跳过，不阻断主服务启动
+if getattr(settings, "agent_enabled", False):
+    try:
+        from .agents_host import mount_agent
+
+        mount_agent(app)
+    except Exception as e:
+        logger.warning("智能体加载失败，已跳过：%s", e)

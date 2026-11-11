@@ -8,6 +8,12 @@ import json
 
 from app.crud.sample_receive import query_by_ids
 from app.crud.file_center import get_file_by_id
+from app.utils.field_coerce import parse_str_list
+
+
+def _format_bztz(v) -> str:
+    arr = v if isinstance(v, list) else parse_str_list(v)
+    return ", ".join(str(x) for x in arr) if arr else (str(v) if v else "")
 
 
 def format_datetime_field(dt, fmt="%Y.%m.%d %H:%M") -> str:
@@ -111,7 +117,7 @@ def assemble_sample_receive_report(F_ZZID: str) -> Dict[str, Any]:
             "F_SFZH": jzxx.get("F_SFZH") or "",
             "F_DZ": jzxx.get("F_DZ") or "",
             "F_LCZD": jzxx.get("F_LCZD") or "",
-            "F_BZTZ": jzxx.get("F_BZTZ") or "",
+            "F_BZTZ": _format_bztz(jzxx.get("F_BZTZ")),
             "F_SJTMH": jzxx.get("F_SJTMH") or "",
             "F_ZQTYS": jzxx.get("F_ZQTYS") or "",
             "F_ZQTYSLB": jzxx.get("F_ZQTYSLB") or "",

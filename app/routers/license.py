@@ -16,6 +16,7 @@ except ImportError:
     LICENSE_ENABLED = False
 
 from ..core.response import ok, err
+from ..utils.license_ui_modules import features_with_legacy_module_labels
 
 router = APIRouter(prefix="/license", tags=["授权管理"])
 
@@ -80,7 +81,7 @@ def get_license_info():
             "authorized_systems": license_data.get('systems', ['*']),
             "issue_date": license_data.get('issue_date', '').split('T')[0],
             "expire_date": expire_date_display,
-            "features": license_data.get('features', {})
+            "features": features_with_legacy_module_labels(license_data.get('features', {}))
         }, "查询成功")
     except Exception as e:
         return err(f"查询授权信息失败: {str(e)}")

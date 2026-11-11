@@ -141,7 +141,7 @@ def _rules_to_options(typ: str, rules: List[Dict[str, Any]]) -> List[Dict[str, A
 
 def load_template(code_or_filename: str) -> Dict[str, Any]:
 	p = CFG_DIR / (f"SCORE_{code_or_filename}.json" if not code_or_filename.lower().endswith(".json") else code_or_filename)
-	with open(p, "r", encoding="utf-8") as f:
+	with open(p, 'r', encoding='utf-8-sig') as f:
 		return json.load(f)
 
 
@@ -163,11 +163,15 @@ def calc_score(template: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]
 		hit_rule: Optional[Dict[str, Any]] = None
 
 		if typ == "enum":
-			for r in it.get("rules", []):
-				if _match_enum(raw, r):
-					hit_score = float(r.get("score") or 0)
-					hit_rule = r
-					break
+			candidates = raw if isinstance(raw, list) else [raw]
+			for val in candidates:
+				for r in it.get("rules", []):
+					if _match_enum(val, r):
+						score = float(r.get("score") or 0)
+						if hit_score is None or score > hit_score:
+							hit_score = score
+							hit_rule = r
+						break
 		elif typ == "range":
 			x = _to_number(raw)
 			if x is not None:

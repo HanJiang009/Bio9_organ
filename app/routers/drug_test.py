@@ -51,7 +51,7 @@ async def create_test_plan(
         "F_SYKSRQ": "2025-11-20",
         "F_SYR": "张三",
         "F_SYJHYMD": "评估5-FU、奥沙利铂对类器官的抑制效果",
-        "F_LQGMD": "5x104 cells/mL",
+        "F_XBSL": "5x104 cells/mL",
         "F_JZJND": "5%",
         "F_JZJTJ": "50uL",
         "F_KBLX": "96孔板",
@@ -195,7 +195,7 @@ async def create_test_plan(
 
 @router.post("/detail", response_model=ApiResponse[TestPlanDetailOut], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["drug_assay"]))])
-def get_test_plan_detail(data: dict):
+def get_test_plan_detail(data: dict, current_user: dict = Depends(get_current_user_optional)):
     """
     获取实验计划详情
     
@@ -219,7 +219,7 @@ def get_test_plan_detail(data: dict):
             "F_SYKSRQ": "2025-11-20 00:00:00",
             "F_SYR": "张三",
             "F_SYJHYMD": "评估5-FU、奥沙利铂对类器官的抑制效果",
-            "F_LQGMD": "5x104 cells/mL",
+            "F_XBSL": "5x104 cells/mL",
         "F_JZJND": "5%",
         "F_JZJTJ": "50uL",
         "F_FJ": null,
@@ -294,13 +294,16 @@ def get_test_plan_detail(data: dict):
     result = crud.get_test_plan_detail(plan_id)
     if not result:
         return err("实验计划不存在")
-    
+    from app.core.data_scope import deny_owner_access
+    denied = deny_owner_access(current_user, result.get("F_SYR"), module="drug_assay")
+    if denied:
+        return denied
     return ok(result, "查询成功")
 
 
 @router.post("/list", response_model=ApiResponse[TestPlanListOut], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["drug_assay"]))])
-def list_test_plans(query: TestPlanListQuery):
+def list_test_plans(query: TestPlanListQuery, current_user: dict = Depends(get_current_user_optional)):
     """
     查询实验计划列表
     
@@ -345,7 +348,12 @@ def list_test_plans(query: TestPlanListQuery):
     ```
     """
     try:
-        items, total = crud.list_test_plans(query.model_dump())
+        from app.core.data_scope import resolve_data_scope
+        items, total = crud.list_test_plans(
+            query.model_dump(),
+            user=current_user,
+            scope=resolve_data_scope(current_user, "drug_assay"),
+        )
         return ok({"items": items, "total": total}, "查询成功")
     except Exception as e:
         return err(f"查询失败: {e}")
@@ -355,7 +363,8 @@ def list_test_plans(query: TestPlanListQuery):
              dependencies=[Depends(require_roles(["drug_assay"]))])
 async def update_test_plan(
     JCXX: str = Form(..., description="基础信息JSON，必须包含F_ID"),
-    ZBXX: str | None = Form(default=None, description="组别信息JSON（更新则覆盖）"),
+    ZBXX: str | None = Form(default=None, description="组别信息JSON：有F_ID=更新，无F_ID=新增"),
+    ZBXX_DEL_IDS: str | None = Form(default=None, description="要删除的组别ID数组JSON，如 [2, 3]"),
     KWXX: str | None = Form(default=None, description="孔位信息JSON（更新则覆盖）"),
     F_FJ: UploadFile | None = File(None, description="附件文件"),
     current_user: dict = Depends(get_current_user_optional)
@@ -390,7 +399,16 @@ async def update_test_plan(
     ```
     
     ### **ZBXX（组别信息）** - 可选
-    如果提供，将完全替换原有的组别和用药信息
+    增量更新组别：**有 F_ID = 更新已有组别，无 F_ID = 新增组别**
+    ```json
+    [
+        {"F_ID": 1, "F_ZBMC": "对照组", "F_ZBLX": "阴性对照", "F_FKSSZ": 3, "F_ND": ["0"], "F_YY": []},
+        {"F_ZBMC": "新增组", "F_ZBLX": "单药", "F_FKSSZ": 3, "F_ND": ["10uM"], "F_YY": [...]}
+    ]
+    ```
+    
+    ### **ZBXX_DEL_IDS（删除组别ID列表）** - 可选
+    要删除的组别 ID 数组，如 `[2, 3]`
     
     ### **KWXX（孔位信息）** - 可选
     如果提供，将完全替换原有的孔位信息
@@ -415,6 +433,8 @@ async def update_test_plan(
     ## 注意事项
     - 使用 multipart/form-data 格式提交
     - JCXX、ZBXX、KWXX 都是 JSON 字符串
+    - ZBXX 采用增量更新：有 F_ID 的条目更新对应组别，无 F_ID 的条目新增组别
+    - ZBXX_DEL_IDS 单独控制删除哪些组别，传入组别 ID 数组
     - 已创建状态：可以修改所有内容，修改用药会重新验证库存并生成出库单
     - 进行中状态：不允许修改组别、用药、孔位、浓度梯度等实验设计
     - 已完成状态：完全不允许修改
@@ -435,6 +455,16 @@ async def update_test_plan(
             zbxx = json.loads(ZBXX)
         except Exception as e:
             return err(f"组别信息(ZBXX)解析失败: {e}")
+    
+    # 解析要删除的组别ID列表
+    zbxx_del_ids = None
+    if ZBXX_DEL_IDS is not None:
+        try:
+            zbxx_del_ids = json.loads(ZBXX_DEL_IDS)
+            if not isinstance(zbxx_del_ids, list):
+                return err("ZBXX_DEL_IDS 必须是数组，如 [2, 3]")
+        except Exception as e:
+            return err(f"删除组别ID列表(ZBXX_DEL_IDS)解析失败: {e}")
     
     # 解析孔位信息
     kwxx = None
@@ -458,6 +488,8 @@ async def update_test_plan(
     payload = {**jcxx}
     if zbxx is not None:
         payload["ZBXX"] = zbxx
+    if zbxx_del_ids is not None:
+        payload["ZBXX_DEL_IDS"] = zbxx_del_ids
     if kwxx is not None:
         payload["KWXX"] = kwxx
     if file_id is not None:
@@ -710,7 +742,7 @@ def mark_unqualified(
         
         result = {
             "F_SYJH_ID": plan_id,
-            "F_BHG": "true",
+            "F_ZT": "不合格审批中",
             "F_BHGYY": reason or ""
         }
         

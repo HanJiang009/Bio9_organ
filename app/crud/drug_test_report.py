@@ -139,8 +139,6 @@ def assemble_drug_test_report(syjh_id: int) -> Dict[str, Any]:
         preprocess_info = None
         if gdid:
             try:
-                from app.crud.file_center import get_file_url
-                
                 cur.execute("""
                     SELECT F_KSCLSJ, F_YBYCL, F_YBYCLQK
                     FROM T_YCL
@@ -151,13 +149,11 @@ def assemble_drug_test_report(syjh_id: int) -> Dict[str, Any]:
                     preprocess_cols = [c[0] for c in cur.description]
                     preprocess_info = dict(zip(preprocess_cols, preprocess_row))
                     
-                    # 转换预处理图片文件ID为URL
-                    ybycl_file_id = preprocess_info.get("F_YBYCL")
-                    if ybycl_file_id:
-                        ybycl_url = get_file_url(ybycl_file_id)
-                        preprocess_info["F_YBYCL_URL"] = ybycl_url if ybycl_url else ""
-                    else:
-                        preprocess_info["F_YBYCL_URL"] = ""
+                    # 转换预处理图片文件ID为URL（支持单 ID 或 ID 列表）
+                    from app.crud.release_inspection_report import _resolve_first_file_url
+                    preprocess_info["F_YBYCL_URL"] = _resolve_first_file_url(
+                        preprocess_info.get("F_YBYCL")
+                    )
                     
                     # 格式化处理时间
                     if preprocess_info.get("F_KSCLSJ"):
@@ -251,7 +247,7 @@ def assemble_drug_test_report(syjh_id: int) -> Dict[str, Any]:
         
         result = {
             # ===== 元信息 =====
-            "报告类型": "药物试验报告",
+            "报告类型": "药物实验报告",
             "生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             
             # ===== 实验计划完整信息（核心） =====

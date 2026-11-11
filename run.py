@@ -42,12 +42,14 @@ if __name__ == "__main__":
                 reload=False,
             )
         else:
-            # 开发环境：使用字符串引用，支持热重载
+            # 开发/部署环境：使用字符串引用，支持热重载
             uvicorn.run(
                 "app.main:app",
                 host=settings.server.host,
                 port=settings.server.port,
                 reload=settings.debug,
+                reload_dirs=["app"] if settings.debug else None,
+                reload_excludes=["logs/*", "*.log"] if settings.debug else None,
             )
     except KeyboardInterrupt:
         print("\n收到退出指令 (Ctrl+C)")

@@ -35,6 +35,7 @@ def create_or_update_preprocess_by_gdid(
     fields: Dict[str, Any],
     template_code: str,
     operator: Optional[str] = None,
+    from_pipeline_template: bool = False,
 ) -> Dict[str, Any]:
 	adapter = get_adapter()
 	
@@ -44,7 +45,7 @@ def create_or_update_preprocess_by_gdid(
 		try:
 			with adapter.connect() as conn_order:
 				cur_order = conn_order.cursor()
-				cur_order.execute("SELECT F_ZZID, F_GDBH, F_DCID, F_DC, F_PYSJ, F_SQR, F_XM, F_BRBH FROM T_PYGD WHERE F_ID = ?", (gdid,))
+				cur_order.execute("SELECT F_ZZID, F_GDBH, F_DCID, F_DC, F_PYSJ, F_SQR, F_XM, F_BRBH, F_YBLY FROM T_PYGD WHERE F_ID = ?", (gdid,))
 				row_order = cur_order.fetchone()
 				if row_order:
 					if not zzid:
@@ -56,7 +57,8 @@ def create_or_update_preprocess_by_gdid(
 						"F_PYSJ": row_order[4],
 						"F_SQR": row_order[5],
 						"F_XM": row_order[6],
-						"F_BRBH": row_order[7]
+						"F_BRBH": row_order[7],
+						"F_YBLY": row_order[8]
 					}
 		except Exception as e:
 			import logging
@@ -118,9 +120,9 @@ def create_or_update_preprocess_by_gdid(
 	
 	if not is_new and old_data and old_data.get("F_YBPFB"):
 		# 更新操作：检查影响评分的字段是否有变化
-		# 评分相关字段：F_YBZLTJ(样本质量), F_ZLXBZB(肿瘤细胞占比), F_XBHL(细胞活力), F_LTSJ(离体时间)
-		# 注意：病灶特征、取样方式在BBXX中，不在此接口修改
-		scoring_fields = ["F_YBZLTJ", "F_ZLXBZB", "F_XBHL"]
+		# 评分相关字段：F_YBZLTJ(样本质量), F_ZLXBZB(肿瘤细胞占比), F_XBHL(细胞活力), F_KSCLSJ(开始处理时间-影响离体时间评分)
+		# 注意：病灶特征、取样方式在BBXX中，不在此接口修改；F_LTSJ从历史数据读取，不检查变化
+		scoring_fields = ["F_YBZLTJ", "F_ZLXBZB", "F_XBHL", "F_KSCLSJ"]
 		
 		# 检查是否有评分相关字段被修改
 		has_scoring_change = False
@@ -189,66 +191,85 @@ def create_or_update_preprocess_by_gdid(
 	with adapter.connect() as conn:
 		cur = conn.cursor()
 		
-		# F_KSCLSJ：允许手动入参；为空串/未传则取当前时间
+		# F_KSCLSJ：用户保存未传则取当前时间；流水线模板预填不得用创建时刻冒充开始处理时间
 		ksclsj_val = fields.get("F_KSCLSJ")
 		if isinstance(ksclsj_val, str) and ksclsj_val.strip() == "":
 			ksclsj_val = None
-		ksclsj_dt = _parse_dt_any(ksclsj_val) or datetime.now()
+		ksclsj_dt = _parse_dt_any(ksclsj_val)
+		if ksclsj_dt is None and not from_pipeline_template:
+			ksclsj_dt = datetime.now()
 
 		# F_LTSJ：来自历史记录，统一为 datetime（无法解析则置空）
 		ltsj_dt = _parse_dt_any(ltsj_from_history)
 
-		# 确保 F_YBYCL（文件ID）按数值清洗
-		def _clean_int(v: Any):
-			try:
-				return int(v) if v is not None and str(v).strip() != "" else None
-			except Exception:
-				return None
-
 		ybycl_present = "F_YBYCL" in fields
-		
+
+		from app.utils.yhbc import yhbc_flag
 		payload: Dict[str, Any] = {
 			"F_ZZID": zzid,
 			"F_GDID": gdid,
 			"F_LTSJ": ltsj_dt,
-			"F_KSCLSJ": ksclsj_dt,
 			"F_QXYCF": fields.get("F_QXYCF"),
 			"F_ZZSPCC": fields.get("F_ZZSPCC"),
 			"F_YBYCLQK": fields.get("F_YBYCLQK"),
 			"F_YBZLTJ": fields.get("F_YBZLTJ"),
 			"F_SFDC": fields.get("F_SFDC"),
 			"F_DCYCF": fields.get("F_DCYCF"),
+			"F_CZR": operator,
+			"F_CZSJ": None if from_pipeline_template else datetime.now(),
+			# 模板预填=0；用户保存接口调用=1（更新时也会刷成 1）
+			"F_YHBC": yhbc_flag(from_pipeline_template),
 		}
+		# 模板预填且未配置开始处理时间：不写入该列，避免 NOT NULL 列被显式 INSERT NULL
+		if ksclsj_dt is not None or not from_pipeline_template:
+			payload["F_KSCLSJ"] = ksclsj_dt
 		# ✅ 只在评分表存在时才更新（使用score_str保持原始格式）
 		if score_str is not None:
 			payload["F_YBPFB"] = score_str
-		
+
 		# F_ZLXBZB、F_XBHL 这两个字段已迁移到培养明细中录入
 		# 只有在请求中明确传了这两个字段时，才更新（避免覆盖培养明细中的值）
 		if "F_ZLXBZB" in fields:
 			payload["F_ZLXBZB"] = fields.get("F_ZLXBZB")
 		if "F_XBHL" in fields:
 			payload["F_XBHL"] = fields.get("F_XBHL")
+		# F_YBYCL 现在存 JSON 数组字符串（或 None），路由层已处理好直接写入
 		if ybycl_present:
-			payload["F_YBYCL"] = _clean_int(fields.get("F_YBYCL"))
+			payload["F_YBYCL"] = fields.get("F_YBYCL") or None
 		
+		def _exec_with_fallback(cur, payload: dict, is_new: bool, gdid: int):
+			"""执行 INSERT/UPDATE，若因新列不存在失败则去掉可选新列后降级重试。"""
+			extra_cols = {"F_CZR", "F_CZSJ", "F_YHBC"}
+			for attempt in range(2):
+				try:
+					if not is_new:
+						sc = [k for k in payload.keys()]
+						sets = ", ".join([f"{c} = ?" for c in sc])
+						params = [payload[c] for c in sc] + [gdid]
+						cur.execute(f"UPDATE T_YCL SET {sets} WHERE F_GDID = ?", tuple(params))
+					else:
+						c_list = list(payload.keys())
+						ph = ", ".join(["?" for _ in c_list])
+						cur.execute(
+							f"INSERT INTO T_YCL ({', '.join(c_list)}) VALUES ({ph})",
+							tuple(payload[c] for c in c_list),
+						)
+					return  # success
+				except Exception:
+					if attempt == 0:
+						# 降级：移除新增列再重试
+						payload = {k: v for k, v in payload.items() if k not in extra_cols}
+					else:
+						raise
+
 		if not is_new:  # 已存在记录，执行更新
-			set_cols = [k for k in payload.keys()]
-			if set_cols:
-				sets = ", ".join([f"{c} = ?" for c in set_cols])
-				params = [payload[c] for c in set_cols] + [gdid]
-				cur.execute(f"UPDATE T_YCL SET {sets} WHERE F_GDID = ?", tuple(params))
+			_exec_with_fallback(cur, payload, False, gdid)
 			cur.execute("SELECT F_ID FROM T_YCL WHERE F_GDID = ?", (gdid,))
 			new_id = int(cur.fetchone()[0])
 		else:  # 新记录，执行插入
-			cols = list(payload.keys())
-			if cols:
-				placeholders = ", ".join(["?" for _ in cols])
-				cur.execute(f"INSERT INTO T_YCL ({', '.join(cols)}) VALUES ({placeholders})", tuple(payload[c] for c in cols))
-				cur.execute("SELECT MAX(F_ID) FROM T_YCL WHERE F_GDID = ?", (gdid,))
-				new_id = int(cur.fetchone()[0])
-			else:
-				new_id = existing_id or gdid
+			_exec_with_fallback(cur, payload, True, gdid)
+			cur.execute("SELECT MAX(F_ID) FROM T_YCL WHERE F_GDID = ?", (gdid,))
+			new_id = int(cur.fetchone()[0])
 
 		conn.commit()
 	
@@ -265,17 +286,18 @@ def create_or_update_preprocess_by_gdid(
 			sample_info = get_sample_basic_info(zzid)
 			
 			# ✅ 获取完整的旧详情数据（用于F_OLD_DATA字段）
+			# 修改前获取完整详情（包含工单信息和预处理信息）
 			old_detail_data = None
 			if not is_new:
 				try:
-					old_detail_data = fetch_preprocess_by_gdid(gdid)
-					logger.info(f"[预处理质控] 成功获取旧详情数据用于备份，工单ID: {gdid}")
+					old_detail_data = fetch_preprocess_detail_by_gdid(gdid)
+					logger.info(f"[预处理质控] 成功获取旧详情数据用于备份（包含工单信息），工单ID: {gdid}")
 				except Exception as e:
 					logger.warning(f"[预处理质控] 获取旧详情数据失败: {e}")
 			
 			# 准备变更信息
 			if is_new:
-				# 新增预处理记录
+				# 新增预处理记录 - 获取新增后的完整详情数据
 				changes = {
 					"操作": "新增预处理信息",
 					"关键信息": {
@@ -287,6 +309,14 @@ def create_or_update_preprocess_by_gdid(
 					}
 				}
 				bglx = "新增"
+				
+				# ✅ 新增操作：获取新增后的完整详情数据（包含工单信息和预处理信息）
+				try:
+					old_detail_data = fetch_preprocess_detail_by_gdid(gdid)
+					logger.info(f"[预处理质控] 新增操作：成功获取新详情数据用于记录（包含工单信息），工单ID: {gdid}")
+				except Exception as e:
+					logger.warning(f"[预处理质控] 新增操作：获取新详情数据失败: {e}")
+					old_detail_data = None
 			else:
 				# 修改预处理记录 - 计算变更
 				# ✅ 如果评分是复用的（未重新计算），从payload中排除F_YBPFB，避免因JSON格式差异被误判为"变更"
@@ -321,7 +351,8 @@ def create_or_update_preprocess_by_gdid(
 				F_DC=order_info.get("F_DC"),
 				F_PYSJ=order_info.get("F_PYSJ"),
 				F_SQR=order_info.get("F_SQR"),
-				F_OLD_DATA=old_detail_data  # ✅ 传入完整旧详情数据
+				F_OLD_DATA=old_detail_data,  # ✅ 传入完整旧详情数据
+				from_pipeline_template=from_pipeline_template,
 			)
 			logger.info(f"[预处理质控] 创建质控审核记录成功，工单ID: {gdid}, 类型: {bglx}, 质控ID: {qc_audit_id}")
 		except Exception as e:
@@ -364,26 +395,90 @@ def fetch_ltsj_for_gdid(gdid: int) -> Optional[str]:
 		return str(val) if val is not None else None
 
 
+def fetch_preprocess_detail_by_gdid(gdid: int) -> Dict[str, Any] | None:
+	"""
+	获取完整的预处理详情数据（包含工单信息和预处理信息）
+	用于质控记录的F_OLD_DATA字段
+	
+	Returns:
+		{
+			"order": {...},  # 工单详情
+			"preprocess": {...}  # 预处理详情
+		}
+	"""
+	try:
+		from app.crud.organoid_culture_tissue import get_culture_order_detail
+		
+		# 获取工单详情
+		order = get_culture_order_detail(gdid)
+		
+		# 获取预处理详情
+		prep = fetch_preprocess_by_gdid(gdid)
+		
+		# 如果两者都没有，返回None
+		if not prep and not order:
+			return None
+		
+		result = {
+			"order": order or {},
+			"preprocess": prep or {},
+		}
+		
+		return result
+	except Exception as e:
+		import logging
+		logger = logging.getLogger(__name__)
+		logger.error(f"获取预处理完整详情失败 (工单ID: {gdid}): {e}", exc_info=True)
+		return None
+
+
 def fetch_preprocess_by_gdid(gdid: int) -> Dict[str, Any] | None:
 	adapter = get_adapter()
 	with adapter.connect() as conn:
 		cur = conn.cursor()
-		cur.execute(
-			"""
-			SELECT F_ID, F_ZZID, F_GDID, F_LTSJ, F_KSCLSJ, F_QXYCF, F_ZZSPCC,
-			       F_YBYCL, F_YBYCLQK, F_YBZLTJ, F_ZLXBZB, F_XBHL, F_YBPFB,
-			       F_SFDC, F_DCYCF
-			FROM T_YCL WHERE F_GDID = ?
-			""",
-			(gdid,),
-		)
+		# 优先查询含操作人/时间/用户保存标记；若列不存在则逐级降级
+		try:
+			cur.execute(
+				"""
+				SELECT F_ID, F_ZZID, F_GDID, F_LTSJ, F_KSCLSJ, F_QXYCF, F_ZZSPCC,
+				       F_YBYCL, F_YBYCLQK, F_YBZLTJ, F_ZLXBZB, F_XBHL, F_YBPFB,
+				       F_SFDC, F_DCYCF, F_CZR, F_CZSJ, F_YHBC
+				FROM T_YCL WHERE F_GDID = ?
+				""",
+				(gdid,),
+			)
+		except Exception:
+			try:
+				cur.execute(
+					"""
+					SELECT F_ID, F_ZZID, F_GDID, F_LTSJ, F_KSCLSJ, F_QXYCF, F_ZZSPCC,
+					       F_YBYCL, F_YBYCLQK, F_YBZLTJ, F_ZLXBZB, F_XBHL, F_YBPFB,
+					       F_SFDC, F_DCYCF, F_CZR, F_CZSJ
+					FROM T_YCL WHERE F_GDID = ?
+					""",
+					(gdid,),
+				)
+			except Exception:
+				cur.execute(
+					"""
+					SELECT F_ID, F_ZZID, F_GDID, F_LTSJ, F_KSCLSJ, F_QXYCF, F_ZZSPCC,
+					       F_YBYCL, F_YBYCLQK, F_YBZLTJ, F_ZLXBZB, F_XBHL, F_YBPFB,
+					       F_SFDC, F_DCYCF
+					FROM T_YCL WHERE F_GDID = ?
+					""",
+					(gdid,),
+				)
 		row = cur.fetchone()
 		if not row:
 			return None
 		cols = [c[0] for c in cur.description]
 		d = dict(zip(cols, row))
 		# 统一时间输出字符串
-		for tk, fmt in (("F_LTSJ", "%Y-%m-%d %H:%M:%S"), ("F_KSCLSJ", "%Y-%m-%d %H:%M:%S")):
+		for tk, fmt in (
+			("F_LTSJ", "%Y-%m-%d %H:%M:%S"),
+			("F_KSCLSJ", "%Y-%m-%d %H:%M:%S"),
+			("F_CZSJ", "%Y-%m-%d %H:%M:%S"),
+		):
 			v = d.get(tk)
 			if v is not None:
 				try:
@@ -398,19 +493,40 @@ def fetch_preprocess_by_gdid(gdid: int) -> Dict[str, Any] | None:
 				d["F_YBPFB"] = json.loads(d["F_YBPFB"])
 		except Exception:
 			pass
-		# 若存在 F_YBYCL（文件ID），补充 F_YBYCL_URL
+		# F_YBYCL_FILES：解析 JSON 数组，组装文件详情数组（兼容旧整数值）
+		d["F_YBYCL_FILES"] = []
 		try:
 			from app.crud.file_center import get_file_by_id
-			from app.core.settings import settings
-			fid = d.get("F_YBYCL")
-			if fid is not None:
-				rec = get_file_by_id(int(fid))
-				if rec and rec.get("F_PATH"):
-					stored_path = str(rec["F_PATH"]).lstrip("/")
-					upload_prefix = settings.upload_dir.strip("/")
-					if upload_prefix and stored_path.startswith(upload_prefix + "/"):
-						stored_path = stored_path[len(upload_prefix) + 1 :]
-					d["F_YBYCL_URL"] = stored_path
+			raw_ybycl = d.get("F_YBYCL")
+			if raw_ybycl is not None:
+				id_list: list = []
+				if isinstance(raw_ybycl, str):
+					try:
+						parsed = json.loads(raw_ybycl)
+						id_list = parsed if isinstance(parsed, list) else [int(parsed)]
+					except Exception:
+						try:
+							id_list = [int(raw_ybycl)]
+						except Exception:
+							pass
+				elif isinstance(raw_ybycl, int):
+					id_list = [raw_ybycl]
+				elif isinstance(raw_ybycl, list):
+					id_list = raw_ybycl
+
+				files = []
+				for fid in id_list:
+					try:
+						rec = get_file_by_id(int(fid))
+						if rec:
+							files.append({
+								"id": int(fid),
+								"path": rec.get("F_PATH"),
+								"name": rec.get("F_ORIGINAL_NAME"),
+							})
+					except Exception:
+						pass
+				d["F_YBYCL_FILES"] = files
 		except Exception:
 			pass
 		return d

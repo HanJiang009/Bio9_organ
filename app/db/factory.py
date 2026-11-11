@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from .adapters.sqlserver import SqlServerAdapter
 from .adapters.dameng import DamengAdapter
+from .adapters.mysql import MySQLAdapter
 from .base import DatabaseAdapter
 
 def get_adapter() -> DatabaseAdapter:
@@ -24,10 +25,12 @@ def get_adapter() -> DatabaseAdapter:
             f"请确保 config/database.json 文件与程序在同一目录下"
         )
     
-    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    data = json.loads(cfg_path.read_text(encoding='utf-8-sig'))
     db_type = data.get("database_type","sqlserver").lower()
     if db_type == "sqlserver":
         return SqlServerAdapter(data["sqlserver"])
     if db_type == "dameng":
         return DamengAdapter(data["dameng"])
+    if db_type == "mysql":
+        return MySQLAdapter(data["mysql"])
     raise ValueError(f"未知数据库类型: {db_type}")

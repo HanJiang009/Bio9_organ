@@ -17,7 +17,7 @@ from .settings import settings
 def issue_token(user: Dict[str, Any], exp_minutes: Optional[int] = None) -> str:
     """签发 JWT。
 
-    user 需要包含：F_ID, F_YSM, 可选 F_NAME/F_JS。
+    user 需要包含：F_ID, F_YSM, 可选 F_NAME / roles（权限键）/ role_name。
     exp_minutes 不传则使用 settings.jwt_exp_minutes。
     """
     now = int(time.time())
@@ -42,6 +42,10 @@ def issue_token(user: Dict[str, Any], exp_minutes: Optional[int] = None) -> str:
         "exp": exp,
         "jti": str(uuid.uuid4()),
     }
+    # 当前会话角色名；刷新 token 时默认沿用，避免前端漏传后回到多角色并集
+    role_name = user.get("role_name") or user.get("F_JS_SELECTED")
+    if role_name:
+        payload["role_name"] = str(role_name).strip()
     token = jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
     # PyJWT 在新版本返回 str；老版本可能返回 bytes
     return token if isinstance(token, str) else token.decode("utf-8")

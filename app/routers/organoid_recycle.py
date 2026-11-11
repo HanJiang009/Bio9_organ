@@ -15,7 +15,8 @@ router = APIRouter(prefix="/organoid-recycle", tags=["organoid_recycle"])
 @router.post("/save", response_model=ApiResponse[dict], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["organoid_culture_tissue"]))])
 async def save_recycle(
-    HSXX: str = Form(..., description="JSON：回收记录主体字段，含 F_GDID, F_HSSJ, F_JSFF, F_HSSL, F_XBZT"),
+    F_GDID: int | None = Form(default=None, description="工单ID（必填）"),
+    HSXX: str | None = Form(default=None, description="JSON：回收记录主体字段，含 F_HSSJ, F_JSFF, F_HSSL, F_XBZT"),
     F_FJ: List[UploadFile] | None = File(None),
     F_FJ_IDS: str | None = Form(default=None, description="JSON数组：覆盖用，文件ID列表"),
     F_FJ_IDS_ADD: str | None = Form(default=None, description="JSON数组：增量新增文件ID"),
@@ -28,8 +29,13 @@ async def save_recycle(
     except Exception:
         return err("HSXX 解析失败")
 
-    if not data.get("F_GDID"):
+    # ✅ 从独立参数或 HSXX JSON 中获取 F_GDID（优先使用独立参数）
+    gdid = F_GDID or data.get("F_GDID")
+    if not gdid:
         return err("缺少 F_GDID")
+    
+    # 将 F_GDID 写入 data（确保 CRUD 层能获取）
+    data["F_GDID"] = int(gdid)
 
     def parse_ids(s: str | None) -> list[int]:
         arr: list[int] = []

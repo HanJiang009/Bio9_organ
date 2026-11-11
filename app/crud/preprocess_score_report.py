@@ -10,6 +10,12 @@ from app.crud.preprocess import fetch_preprocess_by_gdid
 from app.crud.organoid_culture_tissue import get_culture_order_detail
 from app.crud.sample_receive import query_by_ids
 from app.crud.file_center import get_file_by_id
+from app.utils.field_coerce import parse_str_list
+
+
+def _format_bztz(v) -> str:
+    arr = v if isinstance(v, list) else parse_str_list(v)
+    return ", ".join(str(x) for x in arr) if arr else (str(v) if v else "")
 
 
 def format_datetime_field(dt, fmt="%Y.%m.%d %H:%M") -> str:
@@ -124,7 +130,7 @@ def assemble_preprocess_score_report(gdid: int) -> Dict[str, Any]:
             "F_XB": jzxx.get("F_XB") or "",
             "F_NL": jzxx.get("F_NL") or "",
             "F_LCZD": jzxx.get("F_LCZD") or "",
-            "F_BZTZ": jzxx.get("F_BZTZ") or "",
+            "F_BZTZ": _format_bztz(jzxx.get("F_BZTZ")),
         },
         
         # 标本信息

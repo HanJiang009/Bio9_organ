@@ -98,3 +98,23 @@ class SqlServerAdapter(DatabaseAdapter):
             完整的子查询 SQL (单行格式,避免嵌套 f-string 问题)
         """
         return f"SELECT {select_expr} FROM {from_clause} WHERE {where_clause} ORDER BY {order_by} OFFSET 0 ROWS FETCH NEXT 1 ROW ONLY"
+
+    def now(self) -> str:
+        return "GETDATE()"
+
+    def last_insert_id(self, cursor) -> int | None:
+        try:
+            cursor.execute("SELECT SCOPE_IDENTITY()")
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+        except Exception:
+            pass
+        try:
+            cursor.execute("SELECT @@IDENTITY")
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+        except Exception:
+            pass
+        return None

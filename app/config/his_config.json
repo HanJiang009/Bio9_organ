@@ -1,0 +1,68 @@
+{
+  "enabled": true,
+  "mock_mode": true,
+  "timeout": 10,
+  "query_mode": "sequential_fallback",
+  "default_pipeline": "",
+  "field_mappings": [
+    {
+      "field_key": "f_mzh",
+      "label": "门诊号",
+      "url": "http://localhost:5000/get_patient_info_by_mzh",
+      "enabled": true,
+      "priority": 1,
+      "request_key": "f_mzh"
+    },
+    {
+      "field_key": "f_zyh",
+      "label": "住院号",
+      "url": "http://localhost:5000/get_patient_info_by_zyh",
+      "enabled": true,
+      "priority": 2,
+      "request_key": "f_zyh"
+    },
+    {
+      "field_key": "f_brbh",
+      "label": "病人编号",
+      "url": "http://localhost:5000/get_patient_info_by_brbh",
+      "enabled": true,
+      "priority": 3,
+      "request_key": "f_brbh"
+    },
+    {
+      "field_key": "f_sgtm",
+      "label": "试管条码",
+      "url": "http://localhost:5000/get_patient_info_by_sgtm",
+      "enabled": false,
+      "priority": 4,
+      "request_key": "f_sgtm"
+    }
+  ],
+  "query_pipelines": [
+    {
+      "id": "mzh_zyh_merge",
+      "label": "门诊+住院并行合并（结果互补）",
+      "mode": "parallel_merge",
+      "steps": [
+        { "field_key": "f_mzh" },
+        { "field_key": "f_zyh" }
+      ]
+    },
+    {
+      "id": "mzh_chain_zyh",
+      "label": "门诊号→解析住院号→查完整信息（级联）",
+      "mode": "chain",
+      "steps": [
+        {
+          "field_key": "f_mzh",
+          "extract": {
+            "f_zyh": "F_ZYH"
+          }
+        },
+        {
+          "field_key": "f_zyh"
+        }
+      ]
+    }
+  ]
+}

@@ -177,15 +177,23 @@ class GetMxByGdidIn(BaseModel):
 
 @router.post("/mx/get-by-gdid", response_model=ApiResponse[dict], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["organoid_culture_tissue"]))])
-def get_mx_by_gdid(payload: GetMxByGdidIn):
+def get_mx_by_gdid(payload: GetMxByGdidIn, current_user: dict = Depends(get_current_user_optional)):
+    from app.core.data_scope import deny_pygd_access
+    denied = deny_pygd_access(current_user, payload.F_GDID, module="organoid_culture_tissue")
+    if denied:
+        return denied
     data = crud.get_mx_by_gdid(int(payload.F_GDID))
     return ok(data, "查询成功" if data else "未找到记录")
 
 
 @router.post("/detail-by-gdid", response_model=ApiResponse[dict], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["organoid_culture_tissue"]))])
-def detail_by_gdid(payload: GetMxByGdidIn):
+def detail_by_gdid(payload: GetMxByGdidIn, current_user: dict = Depends(get_current_user_optional)):
     gdid = int(payload.F_GDID)
+    from app.core.data_scope import deny_pygd_access
+    denied = deny_pygd_access(current_user, gdid, module="organoid_culture_tissue")
+    if denied:
+        return denied
     order = crud_order.get_culture_order_detail(gdid) if hasattr(crud_order, "get_culture_order_detail") else None
     detail = crud.get_mx_by_gdid(gdid)
     if not order and not detail:
@@ -215,7 +223,7 @@ async def save_mx(
     F_FJ: List[UploadFile] | None = File(None),
     current_user: dict = Depends(get_current_user_optional),
 ):
-    # 解析各 JSON 片段
+    # 解析各 JSON 片段（CDQXX 需兼容二次编码 / 智能引号，避免静默丢字段）
     def parse_json(s: str | None, default):
         if s is None:
             return default
@@ -224,11 +232,40 @@ async def save_mx(
         except Exception:
             return default
 
+    def parse_cdqxx(s: str | None):
+        if s is None:
+            return None
+        raw = str(s).strip()
+        if not raw:
+            return None
+        # 兼容中文弯引号（复制粘贴导致 JSON 非法）
+        raw_fixed = (
+            raw.replace("\u201c", '"')
+            .replace("\u201d", '"')
+            .replace("\u2018", "'")
+            .replace("\u2019", "'")
+        )
+        try:
+            v = json.loads(raw_fixed)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "[mx/save] CDQXX JSON 解析失败，已忽略。raw=%s", raw[:200]
+            )
+            return None
+        # 兼容双重 stringify
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except Exception:
+                return None
+        return v if isinstance(v, dict) else None
+
     pyjtjjl = parse_json(PYJTJJL, None)
     pyxx_xh = parse_json(PYXX_XH, None)
     pyxx_pb = parse_json(PYXX_PB, None)
     pyxx_py = parse_json(PYXX_PY, None)
-    cdqxx = parse_json(CDQXX, None)
+    cdqxx = parse_cdqxx(CDQXX)
     xhmsy_list = parse_json(XHMSYJL, None)
     if isinstance(xhmsy_list, dict):
         xhmsy_list = [xhmsy_list]

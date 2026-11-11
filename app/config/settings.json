@@ -12,5 +12,15 @@
     "logs_dir": "logs",
     "log_level": "INFO",
     "request_log": true,
-    "sql_log": true
+    "sql_log": true,
+    "agent": {
+      "enabled": false,
+      "data_dir": "data/agent",
+      "extractor": "auto",
+      "llm": {
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "timeout": 60
+      }
+    }
 }

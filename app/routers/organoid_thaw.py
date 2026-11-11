@@ -126,11 +126,15 @@ async def save(
 
 @router.post("/detail", response_model=ApiResponse[dict], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["organoid_culture_tissue"]))])
-def detail(payload: Dict[str, Any]):
+def detail(payload: Dict[str, Any], current_user: dict = Depends(get_current_user_optional)):
     try:
         gdid = int(payload.get("F_GDID"))
     except Exception:
         return err("缺少或非法的 F_GDID")
+    from app.core.data_scope import deny_pygd_access
+    denied = deny_pygd_access(current_user, gdid, module="organoid_culture_tissue")
+    if denied:
+        return denied
     data = crud.get_thaw_detail_by_gdid(gdid)
     if not data:
         return err("未找到记录")

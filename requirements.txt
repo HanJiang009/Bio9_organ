@@ -53,9 +53,11 @@ python-docx>=0.8.11
 docxtpl>=0.16.7
 docx2pdf>=0.1.8
 openpyxl>=3.1.0
+pypinyin>=0.49.0
 # 科学计算库（用于药物实验数据分析）
 numpy>=1.24.0
 pandas>=2.0.0
 matplotlib>=3.7.0
 scipy>=1.10.0
 Pillow>=10.0.0
+pymysql>=1.1.0

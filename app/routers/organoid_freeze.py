@@ -34,13 +34,17 @@ def create(payload: Dict[str, Any], current_user: dict = Depends(get_current_use
         return err(f"创建失败: {e}")
 
 
-@router.post("/detail", response_model=ApiResponse[dict], response_model_exclude_none=True,
+@router.post("/detail", response_model=ApiResponse[dict], response_model_exclude_none=False,
              dependencies=[Depends(require_roles(["organoid_culture_tissue"]))])
-def detail(payload: Dict[str, Any]):
+def detail(payload: Dict[str, Any], current_user: dict = Depends(get_current_user_optional)):
     try:
         gdid = int(payload.get("F_GDID"))
     except Exception:
         return err("缺少或非法的 F_GDID")
+    from app.core.data_scope import deny_pygd_access
+    denied = deny_pygd_access(current_user, gdid, module="organoid_culture_tissue")
+    if denied:
+        return denied
 
     from app.db.factory import get_adapter
     adapter = get_adapter()
@@ -63,6 +67,8 @@ def detail(payload: Dict[str, Any]):
         dc_row = cur.fetchone()
         dc_cols = [c[0] for c in cur.description]
         dc_detail = dict(zip(dc_cols, dc_row)) if dc_row else None
+        from app.crud.organoid_freeze import _normalize_dcjl_out
+        dc_detail = _normalize_dcjl_out(dc_detail)
 
         # 关联消化酶记录：通过 T_XHMSY.F_DCJL = T_DCJL.F_ID 限定到本冻存域
         xh_list: List[Dict[str, Any]] = []

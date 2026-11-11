@@ -65,3 +65,6 @@ tmp/
 # 备份文件
 *.bak
 *.backup
+
+# 智能体本地数据（SQLite / 上传副本）
+data/agent/

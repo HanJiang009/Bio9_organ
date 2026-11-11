@@ -13,9 +13,9 @@ from typing import Dict, Any
 from pathlib import Path
 from datetime import datetime
 from docx import Document
-import pythoncom
 
 from app.core.settings import settings
+from app.core.docx_pdf import convert_docx_to_pdf
 from app.crud.file_center import insert_file_record
 from app.crud.release_inspection_report import assemble_release_inspection_report
 from app.crud.culture_detail_report import check_report_conditions
@@ -430,23 +430,10 @@ def generate_release_inspection_pdf(gdid: int, operator: str = None) -> Dict[str
     print(f"开始PDF转换: {temp_docx_path} -> {pdf_path}")
     
     try:
-        # 初始化COM
-        pythoncom.CoInitialize()
-        
-        try:
-            from docx2pdf import convert
-            convert(str(temp_docx_path), str(pdf_path))
-            print(f"PDF转换成功: {pdf_path}")
-        except Exception as e:
-            print(f"警告: PDF转换失败，将返回DOCX文件: {e}")
-            # 如果PDF转换失败，返回DOCX文件
-            pdf_path = temp_docx_path
-            pdf_name = temp_docx_name
-            
-        # 释放COM
-        pythoncom.CoUninitialize()
+        convert_docx_to_pdf(temp_docx_path, pdf_path)
+        print(f"PDF转换成功: {pdf_path}")
     except Exception as e:
-        print(f"警告: COM初始化失败，将返回DOCX文件: {e}")
+        print(f"警告: PDF转换失败，将返回DOCX文件: {e}")
         pdf_path = temp_docx_path
         pdf_name = temp_docx_name
     

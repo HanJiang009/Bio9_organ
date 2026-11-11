@@ -74,6 +74,11 @@ def convert_docx_to_pdf(input_docx: Path, output_pdf: Path) -> Path:
         str(input_docx),
     ]
     subprocess.check_call(cmd)
+    generated = output_pdf.parent / f"{input_docx.stem}.pdf"
+    if generated.exists() and generated != output_pdf:
+        generated.rename(output_pdf)
+    if not output_pdf.exists():
+        raise FileNotFoundError(f"LibreOffice 转换后未找到 PDF: {output_pdf}")
     return output_pdf
 
 
@@ -224,7 +229,10 @@ def render_culture_detail_pdf_with_tables(template_name: str, context: Dict[str,
             row.cells[0].text = str(idx)
             row.cells[1].text = str(obs.get('F_GCSJ', ''))
             row.cells[2].text = str(obs.get('F_FJ', ''))
-            row.cells[3].text = str(obs.get('F_PYJZT', ''))
+            _pyjzt = obs.get('F_PYJZT', '')
+            if isinstance(_pyjzt, list):
+                _pyjzt = ", ".join(str(x) for x in _pyjzt if x)
+            row.cells[3].text = str(_pyjzt or '')
             row.cells[4].text = str(obs.get('F_XBZT', ''))
             row.cells[5].text = str(obs.get('F_SFHY', ''))
             row.cells[6].text = str(obs.get('F_HYJL', ''))

@@ -91,3 +91,64 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
                 pass
             raise
 
+
+def _scope_header(scope: dict, name: str) -> str:
+    target = name.lower().encode("latin1")
+    for key, value in scope.get("headers") or []:
+        if key.lower() == target:
+            try:
+                return value.decode("latin1")
+            except Exception:
+                return ""
+    return ""
+
+
+def _role_name_from_scope(scope: dict) -> str:
+    """从本次请求的 token 取出当前会话角色。无 token 则不脱敏。"""
+    auth = _scope_header(scope, "authorization")
+    token = _scope_header(scope, "x-token")
+    token_str = ""
+    if auth:
+        token_str = auth[7:].strip() if auth.lower().startswith("bearer ") else auth.strip()
+    if not token_str and token:
+        token_str = token.strip()
+    if not token_str:
+        return ""
+    try:
+        from app.core.token import verify_token
+        payload = verify_token(token_str)
+    except Exception:
+        return ""
+    role_name = str(payload.get("role_name") or "").strip()
+    if role_name:
+        return role_name
+    uid = payload.get("sub")
+    if not uid:
+        return ""
+    try:
+        from app.core.session_role import apply_session_role
+        from app.crud.user import get_user
+        user = apply_session_role(get_user(int(uid)), payload)
+    except Exception:
+        return ""
+    return str((user or {}).get("F_JS_SELECTED") or "").strip()
+
+
+class PseudonymMiddleware:
+    """在进入业务前绑定当前角色的伪名化。响应由 PseudonymJSONResponse 按该配置脱敏。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        from app.core.pseudonym import push_role_pseudonym, reset_role_pseudonym
+        token = push_role_pseudonym(_role_name_from_scope(scope))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            reset_role_pseudonym(token)
+
+

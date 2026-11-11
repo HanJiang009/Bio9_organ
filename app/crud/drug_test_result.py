@@ -145,9 +145,10 @@ def _replace_attachment_indices(obj: Any, file_id_map: List[int]) -> Any:
 
 
 def save_experiment_record(
-    data: Dict[str, Any], 
+    data: Dict[str, Any],
     file_ids: List[int],
-    operator: Optional[str] = None
+    operator: Optional[str] = None,
+    skip_qc: bool = False,
 ) -> Dict[str, Any]:
     """
     保存实验记录（一个实验计划只能有一个实验结果记录）
@@ -161,6 +162,7 @@ def save_experiment_record(
         data: 入参数据字典（各字段为JSON字符串）
         file_ids: 上传文件的ID数组（按上传顺序）
         operator: 操作人
+        skip_qc: 为 True 时不写 T_ZKSH 质控（暂存/提交复核前的静默保存）
     
     Returns:
         保存后的完整记录
@@ -235,9 +237,9 @@ def save_experiment_record(
     # 保存是新增还是修改的标记（用于质控记录）
     is_create = (record_id is None)
     
-    # 如果是修改，获取修改前的数据（用于质控记录）
+    # 如果是修改且需要写质控，获取修改前的数据
     old_detail_data = None
-    if not is_create:
+    if not skip_qc and not is_create:
         old_detail_data = get_experiment_record(record_id)
     
     with adapter.connect() as conn:
@@ -307,64 +309,66 @@ def save_experiment_record(
 
         conn.commit()
     
-    # ========== 创建质控记录 ==========
+    # ========== 创建质控记录（暂存 skip_qc=True 时跳过）==========
     qc_audit_id = None
-    try:
-        from app.crud.drug_test import get_test_plan_detail
-        from app.crud.qc_audit import create_qc_audit_record, calculate_changes, get_sample_basic_info
-        
-        # 获取实验计划和工单信息
-        plan_detail = get_test_plan_detail(syjh_id)
-        if plan_detail:
-            gdid = plan_detail.get("F_GDID")
-            gdxx = plan_detail.get("GDXX") or {}
-            zzid = gdxx.get("F_ZZID")
-            
-            if zzid and gdid:
-                # 获取样本基本信息
-                sample_info = get_sample_basic_info(zzid)
-                
-                # 获取保存后的完整详情数据
-                new_detail_data = get_experiment_record_by_plan(syjh_id)
-                
-                # 计算变更内容
-                if is_create:
-                    changes = {
-                        "变更字段": [
-                            {"字段": "操作", "新值": "新增实验记录"},
-                            {"字段": "实验计划", "新值": plan_detail.get("F_SYMC")},
-                            {"字段": "记录人", "新值": operator or "系统"},
-                            {"字段": "记录时间", "新值": str(now)}
-                        ]
-                    }
-                else:
-                    changes = calculate_changes(old_detail_data, new_detail_data)
-                
-                # 创建质控记录
-                qc_audit_id = create_qc_audit_record(
-                    F_ZKJD="药物实验记录",
-                    F_BGLX="新增" if is_create else "修改",
-                    F_ZZID=zzid,
-                    F_CHANGES=changes,
-                    F_JLR=operator or "系统",
-                    F_GDID=gdid,
-                    F_XM=sample_info.get("F_XM"),
-                    F_BRBH=sample_info.get("F_BRBH"),
-                    F_GDBH=gdxx.get("F_GDBH"),
-                    F_DCID=gdxx.get("F_DCID"),
-                    F_DC=gdxx.get("F_DC"),
-                    F_PYSJ=gdxx.get("F_PYSJ"),
-                    F_SQR=gdxx.get("F_SQR"),
-                    F_OLD_DATA=new_detail_data
-                )
-                logger.info(f"[药物实验记录质控] 质控记录创建成功，记录ID: {record_id}, 质控ID: {qc_audit_id}, 类型: {'新增' if is_create else '修改'}")
-    except Exception as e:
-        logger.error(f"[药物实验记录质控] 创建质控审核记录失败（记录ID: {record_id}）: {e}", exc_info=True)
-    
+    if not skip_qc:
+        try:
+            from app.crud.drug_test import get_test_plan_detail
+            from app.crud.qc_audit import create_qc_audit_record, calculate_changes, get_sample_basic_info
+
+            plan_detail = get_test_plan_detail(syjh_id)
+            if plan_detail:
+                gdid = plan_detail.get("F_GDID")
+                gdxx = plan_detail.get("GDXX") or {}
+                zzid = gdxx.get("F_ZZID")
+
+                if zzid and gdid:
+                    sample_info = get_sample_basic_info(zzid)
+                    new_detail_data = get_experiment_record_by_plan(syjh_id)
+
+                    if is_create:
+                        changes = {
+                            "变更字段": [
+                                {"字段": "操作", "新值": "新增实验记录"},
+                                {"字段": "实验计划", "新值": plan_detail.get("F_SYMC")},
+                                {"字段": "记录人", "新值": operator or "系统"},
+                                {"字段": "记录时间", "新值": str(now)},
+                            ]
+                        }
+                    else:
+                        changes = calculate_changes(old_detail_data, new_detail_data)
+
+                    qc_audit_id = create_qc_audit_record(
+                        F_ZKJD="药物实验记录",
+                        F_BGLX="新增" if is_create else "修改",
+                        F_ZZID=zzid,
+                        F_CHANGES=changes,
+                        F_JLR=operator or "系统",
+                        F_GDID=gdid,
+                        F_XM=sample_info.get("F_XM"),
+                        F_BRBH=sample_info.get("F_BRBH"),
+                        F_YBLY=gdxx.get("F_YBLY"),
+                        F_GDBH=gdxx.get("F_GDBH"),
+                        F_DCID=gdxx.get("F_DCID"),
+                        F_DC=gdxx.get("F_DC"),
+                        F_PYSJ=gdxx.get("F_PYSJ"),
+                        F_SQR=gdxx.get("F_SQR"),
+                        F_OLD_DATA=new_detail_data if is_create else old_detail_data,
+                    )
+                    logger.info(
+                        f"[药物实验记录质控] 质控记录创建成功，记录ID: {record_id}, "
+                        f"质控ID: {qc_audit_id}, 类型: {'新增' if is_create else '修改'}"
+                    )
+        except Exception as e:
+            logger.error(
+                f"[药物实验记录质控] 创建质控审核记录失败（记录ID: {record_id}）: {e}",
+                exc_info=True,
+            )
+
     result = get_experiment_record(record_id)
     if qc_audit_id:
         result["qc_audit_id"] = qc_audit_id
-    
+
     return result
 
 
@@ -672,6 +676,8 @@ def list_experiment_records(
     syjh_id: Optional[int] = None,
     jlr: Optional[str] = None,
     keyword: Optional[str] = None,
+    user: Optional[Dict[str, Any]] = None,
+    scope: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """获取实验记录列表（分页）"""
     adapter = get_adapter()
@@ -689,7 +695,10 @@ def list_experiment_records(
         kw = f"%{keyword.strip()}%"
         where.append("F_SYJL LIKE ?")
         params.append(kw)
-    
+
+    from app.core.data_scope import apply_owner_filter
+    apply_owner_filter(where, params, scope=scope, user=user, column="F_JLR", match="name")
+
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
     base_sql = f"""
@@ -742,6 +751,8 @@ def count_experiment_records(
     syjh_id: Optional[int] = None,
     jlr: Optional[str] = None,
     keyword: Optional[str] = None,
+    user: Optional[Dict[str, Any]] = None,
+    scope: Optional[str] = None,
 ) -> int:
     """统计实验记录总数"""
     adapter = get_adapter()
@@ -759,7 +770,10 @@ def count_experiment_records(
         kw = f"%{keyword.strip()}%"
         where.append("F_SYJL LIKE ?")
         params.append(kw)
-    
+
+    from app.core.data_scope import apply_owner_filter
+    apply_owner_filter(where, params, scope=scope, user=user, column="F_JLR", match="name")
+
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     sql = f"SELECT COUNT(*) AS cnt FROM T_SYJL {where_sql}"
     rows, _ = adapter.fetch_all(sql, params)

@@ -8,6 +8,13 @@ from datetime import datetime
 from app.db.factory import get_adapter
 
 
+def _normalize_zkjd(zkjd: str) -> str:
+    """统一质控阶段名称（兼容历史「药物试验报告」）"""
+    if zkjd == "药物试验报告":
+        return "药物实验报告"
+    return zkjd
+
+
 def upload_qc_file(
     zkjd: str,
     file_ids: List[int],
@@ -20,7 +27,7 @@ def upload_qc_file(
     质控文件统一上传接口
     
     Args:
-        zkjd: 质控阶段（知情同意书、接收质控、样本质量评分表、类器官质控、类器官放行报告、药物试验报告）
+        zkjd: 质控阶段（知情同意书、接收质控、样本质量评分表、类器官质控、类器官放行报告、药物实验报告、动物实验报告）
         file_ids: 上传的文件ID列表
         uploader: 上传人
         gdid: 工单ID（可选，与gdbh/zzid三选一）
@@ -32,6 +39,8 @@ def upload_qc_file(
     """
     if not file_ids:
         return {"success": False, "message": "未提供文件"}
+
+    zkjd = _normalize_zkjd(zkjd)
     
     # 参数校验：三选一
     if not any([gdid, gdbh, zzid]):
@@ -121,9 +130,17 @@ def upload_qc_file(
                 else:
                     result = _append_to_zkjl_pdf_fxjc(cur, final_gdid, file_ids, adapter)
                 
-            elif zkjd == "药物试验报告":
-                # 留白（模块未开发）
-                result = {"success": False, "message": "药物试验模块尚未开发"}
+            elif zkjd == "药物实验报告":
+                if not final_gdid:
+                    result = {"success": False, "message": "药物实验报告上传必须提供工单ID或工单编号"}
+                else:
+                    result = _append_to_syjh_pdf(cur, final_gdid, file_ids, adapter)
+
+            elif zkjd == "动物实验报告":
+                if not final_gdid:
+                    result = {"success": False, "message": "动物实验报告上传必须提供工单ID或工单编号"}
+                else:
+                    result = _append_to_dwsy_jh_pdf(cur, final_gdid, file_ids, adapter)
                 
             else:
                 result = {"success": False, "message": f"未知的质控阶段: {zkjd}"}
@@ -159,7 +176,7 @@ def upload_qc_file(
 
 
 def _append_to_ybzj_zqtys(cur, zzid: str, file_ids: List[int], adapter) -> Dict[str, Any]:
-    """追加文件ID到 T_YBZJ.F_ZQTYS_ID 数组"""
+    """追加文件ID到 T_YBZJ.F_ZQTYS_ID 数组，并同步更新 F_ZQTYS 为「是」"""
     try:
         # 查询现有记录
         select_sql = "SELECT F_ZQTYS_ID FROM T_YBZJ WHERE F_ZZID = ?"
@@ -199,10 +216,10 @@ def _append_to_ybzj_zqtys(cur, zzid: str, file_ids: List[int], adapter) -> Dict[
             if fid not in existing_ids:
                 existing_ids.append(fid)
         
-        # 更新数据库
+        # 更新数据库（有知情同意书文件时同步标记 F_ZQTYS=是）
         new_value = json.dumps(existing_ids, ensure_ascii=False)
-        update_sql = "UPDATE T_YBZJ SET F_ZQTYS_ID = ? WHERE F_ZZID = ?"
-        cur.execute(update_sql, [new_value, zzid])
+        update_sql = "UPDATE T_YBZJ SET F_ZQTYS_ID = ?, F_ZQTYS = ? WHERE F_ZZID = ?"
+        cur.execute(update_sql, [new_value, "是", zzid])
         
         return {"success": True}
     except Exception as e:
@@ -517,7 +534,7 @@ def delete_upload_record(record_id: int) -> Dict[str, Any]:
         return {"success": False, "message": f"上传记录 {record_id} 不存在"}
     
     record = dict(zip(cols, rows[0]))
-    zkjd = record.get("F_ZKJD")
+    zkjd = _normalize_zkjd(record.get("F_ZKJD") or "")
     fj_json = record.get("F_FJ")
     gdid = record.get("F_GDID")
     zzid = record.get("F_ZZID")
@@ -554,6 +571,10 @@ def delete_upload_record(record_id: int) -> Dict[str, Any]:
                 result = _remove_from_zkjl_pdf(cur, gdid, file_ids, adapter)
             elif zkjd == "类器官放行报告":
                 result = _remove_from_zkjl_pdf_fxjc(cur, gdid, file_ids, adapter)
+            elif zkjd == "药物实验报告":
+                result = _remove_from_syjh_pdf(cur, gdid, file_ids, adapter)
+            elif zkjd == "动物实验报告":
+                result = _remove_from_dwsy_jh_pdf(cur, gdid, file_ids, adapter)
             else:
                 result = {"success": True}  # 未知阶段，只删除记录
             
@@ -765,4 +786,84 @@ def _remove_from_zkjl_pdf_fxjc(cur, gdid: int, file_ids: List[int], adapter) -> 
         return {"success": True}
     except Exception as e:
         return {"success": False, "message": f"从类器官放行报告PDF移除文件失败: {str(e)}"}
+
+
+def _append_to_syjh_pdf(cur, gdid: int, file_ids: List[int], adapter) -> Dict[str, Any]:
+    """追加到药物实验计划 T_SYJH.F_BG_PDF 的 uploaded 数组"""
+    try:
+        syjh_sql = "SELECT F_ID FROM T_SYJH WHERE F_GDID = ? ORDER BY F_CJSJ DESC"
+        syjh_rows, syjh_cols = adapter.fetch_all(syjh_sql, [gdid])
+
+        if not syjh_rows:
+            return {"success": False, "message": f"工单ID {gdid} 未找到关联的药物实验计划"}
+
+        syjh_id = dict(zip(syjh_cols, syjh_rows[0]))["F_ID"]
+
+        from app.crud.drug_test_report_pdf_manager import add_uploaded_pdf
+        for file_id in file_ids:
+            add_uploaded_pdf(syjh_id, file_id)
+
+        return {"success": True, "message": "PDF已追加到药物实验计划"}
+    except Exception as e:
+        return {"success": False, "message": f"追加到药物实验计划PDF失败: {str(e)}"}
+
+
+def _remove_from_syjh_pdf(cur, gdid: int, file_ids: List[int], adapter) -> Dict[str, Any]:
+    """从药物实验计划 T_SYJH.F_BG_PDF 的 uploaded 数组中移除"""
+    try:
+        syjh_sql = "SELECT F_ID FROM T_SYJH WHERE F_GDID = ? ORDER BY F_CJSJ DESC"
+        syjh_rows, syjh_cols = adapter.fetch_all(syjh_sql, [gdid])
+
+        if not syjh_rows:
+            return {"success": False, "message": f"工单ID {gdid} 未找到关联的药物实验计划"}
+
+        syjh_id = dict(zip(syjh_cols, syjh_rows[0]))["F_ID"]
+
+        from app.crud.drug_test_report_pdf_manager import remove_uploaded_pdf
+        for file_id in file_ids:
+            remove_uploaded_pdf(syjh_id, file_id)
+
+        return {"success": True, "message": "PDF已从药物实验计划移除"}
+    except Exception as e:
+        return {"success": False, "message": f"从药物实验计划PDF移除失败: {str(e)}"}
+
+
+def _append_to_dwsy_jh_pdf(cur, gdid: int, file_ids: List[int], adapter) -> Dict[str, Any]:
+    """追加到动物实验计划 T_DWSY_JH.F_BG_PDF 的 uploaded 数组"""
+    try:
+        jh_sql = "SELECT F_ID FROM T_DWSY_JH WHERE F_GDID = ? ORDER BY F_CJSJ DESC"
+        jh_rows, jh_cols = adapter.fetch_all(jh_sql, [gdid])
+
+        if not jh_rows:
+            return {"success": False, "message": f"工单ID {gdid} 未找到关联的动物实验计划"}
+
+        jh_id = dict(zip(jh_cols, jh_rows[0]))["F_ID"]
+
+        from app.crud.animal_test_report_pdf_manager import add_uploaded_pdf
+        for file_id in file_ids:
+            add_uploaded_pdf(jh_id, file_id)
+
+        return {"success": True, "message": "PDF已追加到动物实验计划"}
+    except Exception as e:
+        return {"success": False, "message": f"追加到动物实验计划PDF失败: {str(e)}"}
+
+
+def _remove_from_dwsy_jh_pdf(cur, gdid: int, file_ids: List[int], adapter) -> Dict[str, Any]:
+    """从动物实验计划 T_DWSY_JH.F_BG_PDF 的 uploaded 数组中移除"""
+    try:
+        jh_sql = "SELECT F_ID FROM T_DWSY_JH WHERE F_GDID = ? ORDER BY F_CJSJ DESC"
+        jh_rows, jh_cols = adapter.fetch_all(jh_sql, [gdid])
+
+        if not jh_rows:
+            return {"success": False, "message": f"工单ID {gdid} 未找到关联的动物实验计划"}
+
+        jh_id = dict(zip(jh_cols, jh_rows[0]))["F_ID"]
+
+        from app.crud.animal_test_report_pdf_manager import remove_uploaded_pdf
+        for file_id in file_ids:
+            remove_uploaded_pdf(jh_id, file_id)
+
+        return {"success": True, "message": "PDF已从动物实验计划移除"}
+    except Exception as e:
+        return {"success": False, "message": f"从动物实验计划PDF移除失败: {str(e)}"}
 

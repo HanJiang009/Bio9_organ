@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from decimal import Decimal
 import json
 
 from app.db.factory import get_adapter
@@ -16,6 +17,48 @@ def _now() -> datetime:
 
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _clean_datetime(v: Any) -> Optional[str]:
+    """将入参规范为 DATETIME 列可绑定的 'YYYY-MM-DD HH:MM:SS' 字符串（兼容达梦/SQL Server）。"""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+    s = str(v).strip()
+    if not s:
+        return None
+    if "T" in s:
+        s = s.replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s[: len(fmt.replace("%", "0")) if fmt == "%Y-%m-%d" else 19], fmt).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        except Exception:
+            continue
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+    return s
+
+
+def _convert_decimals(obj: Any) -> Any:
+    """
+    递归转换对象中的 Decimal 类型为 float，使其可以被 JSON 序列化
+    """
+    if isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: _convert_decimals(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_decimals(item) for item in obj]
+    elif isinstance(obj, datetime):
+        return obj.isoformat() if obj else None
+    else:
+        return obj
 
 
 def _get_full_culture_detail_by_gdid(gdid: int) -> Dict[str, Any]:
@@ -228,11 +271,156 @@ def _clean_str(v: Any) -> Optional[str]:
     return s if s else None
 
 
+def _cdqxbzs_from_cdqxx(cdqxx: Dict[str, Any] | None) -> Optional[str]:
+    """传代前细胞总数：写 T_PYMX_ZZ.F_CDQXBZS；兼容流水线模板旧键 F_CDQ_XBMD。"""
+    if not cdqxx:
+        return None
+    v = cdqxx.get("F_CDQXBZS")
+    if v is None or (isinstance(v, str) and not str(v).strip()):
+        v = cdqxx.get("F_CDQ_XBMD")
+    return _clean_str(v)
+
+
 def _json_dumps(obj: Any) -> Optional[str]:
     try:
         return json.dumps(obj, ensure_ascii=False)
     except Exception:
         return None
+
+
+def _build_jzj_items_full_replace(items: Any) -> List[Dict[str, Any]]:
+    """全量替换基质胶：按入参顺序重建 JSON 数组，F_ID 从 1 递增（忽略入参中的 F_ID）。"""
+    if items is None:
+        return []
+    if isinstance(items, dict):
+        items = [items]
+    result: List[Dict[str, Any]] = []
+    next_id = 1
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        result.append({
+            "F_ID": next_id,
+            "F_JZJ": _clean_str(it.get("F_JZJ")),
+            "F_YL": _clean_num(it.get("F_YL")),
+            "F_ND": _clean_str(it.get("F_ND")),
+        })
+        next_id += 1
+    return result
+
+
+def _apply_pyxx_pb_scalars(target: Dict[str, Any], pyxx_pb: Dict[str, Any]) -> None:
+    """将铺板主表标量字段写入 target dict。"""
+    if pyxx_pb.get("F_PYBBH") is not None:
+        target["F_PYBBH"] = _clean_str(pyxx_pb.get("F_PYBBH"))
+    if pyxx_pb.get("F_JZKBS") is not None:
+        target["F_JZKBS"] = _clean_num(pyxx_pb.get("F_JZKBS"))
+    if pyxx_pb.get("F_DKJZTJ") is not None:
+        target["F_DKJZTJ"] = _clean_num(pyxx_pb.get("F_DKJZTJ"))
+    if pyxx_pb.get("F_CJWD") is not None:
+        target["F_CJWD"] = _clean_num(pyxx_pb.get("F_CJWD"))
+    if pyxx_pb.get("F_CJSJ") is not None:
+        target["F_CJSJ"] = _clean_num(pyxx_pb.get("F_CJSJ"))
+
+
+def _build_xhmsy_insert_rec(gdid: int, mx_id: int, e: Dict[str, Any]) -> Dict[str, Any]:
+    """组装一条待插入的 T_XHMSY 记录（不含 F_ID）。"""
+    return {
+        "F_GDID": gdid,
+        "F_MXID": mx_id,
+        "F_XHM": _clean_str((e or {}).get("F_XHM")),
+        "F_YL": _clean_num((e or {}).get("F_YL")),
+        "F_ND": _clean_str((e or {}).get("F_ND")),
+        "F_SYCS": _clean_int((e or {}).get("F_SYCS")),
+        "F_XHWD": _clean_num((e or {}).get("F_XHWD")),
+        "F_CZFS": _clean_str((e or {}).get("F_CZFS")),
+        "F_LXSL": _clean_num((e or {}).get("F_LXSL")),
+        "F_XHSJ": _clean_num((e or {}).get("F_XHSJ")),
+        "F_BZ": _clean_str((e or {}).get("F_BZ")),
+    }
+
+
+def _replace_xhmsy_for_mx(
+    cur,
+    gdid: int,
+    mx_id: int,
+    xhmsy_list: List[Dict[str, Any]],
+) -> tuple[List[int], List[int], List[int]]:
+    """
+    按增量方式同步本培养明细下的消化酶记录（仅 F_GDID + F_MXID 范围，不影响冻存域 F_DCJL 记录）。
+
+    入参 xhmsy_list 仍代表"保存后应存在的完整记录集合"（即语义上等价于全量替换），但落库时
+    改为增量式 UPDATE/INSERT/DELETE，而不是先整体 DELETE 再 INSERT：
+
+    - 携带 F_ID 且该 ID 属于当前明细：就地 UPDATE，保留原 F_ID；
+    - 不携带 F_ID（或 F_ID 不属于当前明细）：视为新增，执行 INSERT；
+    - 当前存在但未出现在入参列表中的记录：视为被移除，执行 DELETE。
+
+    这样在只修改其他字段、消化酶记录内容未变时，F_ID 不会发生变化，避免质控记录把“内容完全
+    相同、只是被重新写入一次”的消化酶记录误判为变更。
+
+    返回 (deleted_ids, inserted_ids, updated_ids)。
+    """
+    cur.execute(
+        "SELECT F_ID FROM T_XHMSY WHERE F_GDID = ? AND F_MXID = ?",
+        (gdid, mx_id),
+    )
+    existing_ids = {int(r[0]) for r in cur.fetchall() if r and r[0] is not None}
+
+    kept_ids: set = set()
+    inserted_ids: List[int] = []
+    updated_ids: List[int] = []
+
+    for e in (xhmsy_list or []):
+        fid = (e or {}).get("F_ID")
+        fid_int: Optional[int] = None
+        if fid is not None and str(fid).strip() != "":
+            try:
+                fid_int = int(fid)
+            except Exception:
+                fid_int = None
+
+        rec = _build_xhmsy_insert_rec(gdid, mx_id, e)
+
+        if fid_int is not None and fid_int in existing_ids:
+            # 已存在记录：原地更新，保留 F_ID，避免产生"假变更"
+            sets = ", ".join([f"{c} = ?" for c in rec.keys()])
+            cur.execute(
+                f"UPDATE T_XHMSY SET {sets} WHERE F_ID = ? AND F_GDID = ? AND F_MXID = ?",
+                tuple(rec.values()) + (fid_int, gdid, mx_id),
+            )
+            kept_ids.add(fid_int)
+            updated_ids.append(fid_int)
+        else:
+            # 新记录（无F_ID或F_ID不属于本明细）：插入
+            cols = list(rec.keys())
+            ph = ", ".join(["?" for _ in cols])
+            cur.execute(
+                f"INSERT INTO T_XHMSY ({', '.join(cols)}) VALUES ({ph})",
+                tuple(rec[c] for c in cols),
+            )
+            try:
+                cur.execute(
+                    "SELECT MAX(F_ID) FROM T_XHMSY WHERE F_GDID = ? AND F_MXID = ?",
+                    (gdid, mx_id),
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    new_id = int(row[0])
+                    inserted_ids.append(new_id)
+                    kept_ids.add(new_id)
+            except Exception:
+                pass
+
+    deleted_ids = sorted(existing_ids - kept_ids)
+    if deleted_ids:
+        placeholders = ", ".join(["?" for _ in deleted_ids])
+        cur.execute(
+            f"DELETE FROM T_XHMSY WHERE F_GDID = ? AND F_MXID = ? AND F_ID IN ({placeholders})",
+            (gdid, mx_id, *deleted_ids),
+        )
+
+    return deleted_ids, inserted_ids, updated_ids
 
 
 def create_mx(
@@ -246,7 +434,9 @@ def create_mx(
     qxycf: Optional[str],
     file_ids: List[int] | None,
     operator: Optional[str],
+    from_pipeline_template: bool = False,
 ) -> Dict[str, Any]:
+    from app.utils.yhbc import yhbc_flag
     adapter = get_adapter()
     with adapter.connect() as conn:
         cur = conn.cursor()
@@ -255,7 +445,9 @@ def create_mx(
         row: Dict[str, Any] = {"F_GDID": gdid}
         now = _now()
         row["F_CZR"] = operator
-        row["F_CZSJ"] = now
+        # 模板预填只带配置字段，操作时间留给用户真实保存时再写
+        row["F_CZSJ"] = None if from_pipeline_template else now
+        row["F_YHBC"] = yhbc_flag(from_pipeline_template)
 
         if pyjtjjl:
             row["F_PYJ_WD"] = _clean_num(pyjtjjl.get("F_PYJ_WD"))
@@ -314,8 +506,8 @@ def create_mx(
             row["F_PYX_FRSJ"] = _clean_str(pyxx_py.get("F_PYX_FRSJ"))
 
         if cdqxx:
-            row["F_CDQ_XBMD"] = _clean_num(cdqxx.get("F_CDQ_XBMD"))
-            row["F_CDQ_XBHL"] = _clean_num(cdqxx.get("F_CDQ_XBHL"))
+            row["F_CDQXBZS"] = _cdqxbzs_from_cdqxx(cdqxx)
+            row["F_CDQ_XBHL"] = _clean_str(cdqxx.get("F_CDQ_XBHL"))
             row["F_JZMD"] = _clean_str(cdqxx.get("F_JZMD"))
 
         if qxycf is not None:
@@ -335,13 +527,20 @@ def create_mx(
                     continue
             row["F_FJ"] = _json_dumps(uniq)
 
-        # INSERT 主表
-        cols = list(row.keys())
-        placeholders = ", ".join(["?" for _ in cols])
-        cur.execute(
-            f"INSERT INTO T_PYMX_ZZ ({', '.join(cols)}) VALUES ({placeholders})",
-            tuple(row[c] for c in cols),
-        )
+        # INSERT 主表（F_YHBC 列未迁移时降级）
+        def _insert_mx(data: Dict[str, Any]) -> None:
+            cols = list(data.keys())
+            placeholders = ", ".join(["?" for _ in cols])
+            cur.execute(
+                f"INSERT INTO T_PYMX_ZZ ({', '.join(cols)}) VALUES ({placeholders})",
+                tuple(data[c] for c in cols),
+            )
+
+        try:
+            _insert_mx(row)
+        except Exception:
+            row.pop("F_YHBC", None)
+            _insert_mx(row)
 
         # 获取新ID
         cur.execute("SELECT MAX(F_ID) FROM T_PYMX_ZZ WHERE F_GDID = ?", (gdid,))
@@ -377,6 +576,7 @@ def create_mx(
                 except Exception:
                     pass
 
+        synced_create = _sync_order_cell_totals_from_cdqxx(gdid, cdqxx, cur=cur)
         conn.commit()
         
         # 同步到 T_YCL 并重新计算评分
@@ -401,12 +601,15 @@ def create_mx(
             import traceback
             traceback.print_exc()
 
-        return {
+        result = {
             "F_MXID": mx_id,
             "F_GDID": gdid,
             "F_FJ_IDS": json.loads(row.get("F_FJ") or "[]"),
             "XHMSY_IDS": xh_ids,
         }
+        if synced_create:
+            result["order_cell_totals"] = synced_create
+        return result
 
 
 def update_mx(
@@ -438,7 +641,7 @@ def update_mx(
         if int(current.get("F_GDID") or 0) != int(gdid):
             return None
 
-        updates: Dict[str, Any] = {"F_CZR": operator, "F_CZSJ": _now()}
+        updates: Dict[str, Any] = {"F_CZR": operator, "F_CZSJ": _now(), "F_YHBC": 1}
 
         if pyjtjjl:
             updates["F_PYJ_WD"] = _clean_num(pyjtjjl.get("F_PYJ_WD"))
@@ -461,8 +664,8 @@ def update_mx(
             updates["F_PYX_HUM"] = _clean_num(pyxx_py.get("F_PYX_HUM"))
             updates["F_PYX_FRSJ"] = _clean_str(pyxx_py.get("F_PYX_FRSJ"))
         if cdqxx:
-            updates["F_CDQ_XBMD"] = _clean_num(cdqxx.get("F_CDQ_XBMD"))
-            updates["F_CDQ_XBHL"] = _clean_num(cdqxx.get("F_CDQ_XBHL"))
+            updates["F_CDQXBZS"] = _cdqxbzs_from_cdqxx(cdqxx)
+            updates["F_CDQ_XBHL"] = _clean_str(cdqxx.get("F_CDQ_XBHL"))
             updates["F_JZMD"] = _clean_str(cdqxx.get("F_JZMD"))
         if qxycf is not None:
             updates["F_QXYCF"] = _clean_str(qxycf)
@@ -487,169 +690,56 @@ def update_mx(
                     pass
         updates["F_FJ"] = _json_dumps(sorted(list(exist_set)))
 
-        # JZJ 合并
-        try:
-            exist_jzj = json.loads(current.get("F_JZJ") or "[]")
-        except Exception:
-            exist_jzj = []
-        by_id = {int(it.get("F_ID")): it for it in exist_jzj if it.get("F_ID") is not None}
-        max_id = max([int(it.get("F_ID")) for it in exist_jzj if it.get("F_ID") is not None] + [0])
-        if jzj_delete_ids:
-            delset = {int(x) for x in jzj_delete_ids if x is not None}
-            exist_jzj = [it for it in exist_jzj if int(it.get("F_ID") or 0) not in delset]
-            by_id = {int(it.get("F_ID")): it for it in exist_jzj if it.get("F_ID") is not None}
+        # 基质胶：入参含 F_JZJ 时全量替换（忽略 JZJ_IDS_DELETE）
         if pyxx_pb:
-            if pyxx_pb.get("F_PYBBH") is not None:
-                updates["F_PYBBH"] = _clean_str(pyxx_pb.get("F_PYBBH"))
-            if pyxx_pb.get("F_JZKBS") is not None:
-                updates["F_JZKBS"] = _clean_num(pyxx_pb.get("F_JZKBS"))
-            if pyxx_pb.get("F_DKJZTJ") is not None:
-                updates["F_DKJZTJ"] = _clean_num(pyxx_pb.get("F_DKJZTJ"))
-            if pyxx_pb.get("F_CJWD") is not None:
-                updates["F_CJWD"] = _clean_num(pyxx_pb.get("F_CJWD"))
-            if pyxx_pb.get("F_CJSJ") is not None:
-                updates["F_CJSJ"] = _clean_num(pyxx_pb.get("F_CJSJ"))
-            items = pyxx_pb.get("F_JZJ")
-            if items is not None:
-                if isinstance(items, dict):
-                    items = [items]
-                for it in items or []:
-                    fid = it.get("F_ID")
-                    if fid is not None and str(fid).strip() != "":
-                        try:
-                            fid_int = int(fid)
-                            base = by_id.get(fid_int)
-                            if base is None:
-                                base = {"F_ID": fid_int}
-                                exist_jzj.append(base)
-                            base["F_JZJ"] = _clean_str(it.get("F_JZJ"))
-                            base["F_YL"] = _clean_num(it.get("F_YL"))
-                            base["F_ND"] = _clean_str(it.get("F_ND"))
-                            by_id[fid_int] = base
-                        except Exception:
-                            pass
-                    else:
-                        # 新增，分配递增ID
-                        max_id += 1
-                        exist_jzj.append({
-                            "F_ID": max_id,
-                            "F_JZJ": _clean_str(it.get("F_JZJ")),
-                            "F_YL": _clean_num(it.get("F_YL")),
-                            "F_ND": _clean_str(it.get("F_ND")),
-                        })
-        updates["F_JZJ"] = _json_dumps(exist_jzj)
+            _apply_pyxx_pb_scalars(updates, pyxx_pb)
+            if "F_JZJ" in pyxx_pb:
+                updates["F_JZJ"] = _json_dumps(
+                    _build_jzj_items_full_replace(pyxx_pb.get("F_JZJ"))
+                )
 
-        # 执行更新
+        # 执行更新（F_YHBC 未迁移时降级）
         set_cols = [k for k, v in updates.items() if v is not None]
         if set_cols:
-            sets = ", ".join([f"{c} = ?" for c in set_cols])
-            params = [updates[c] for c in set_cols] + [mx_id]
-            cur.execute(f"UPDATE T_PYMX_ZZ SET {sets} WHERE F_ID = ?", tuple(params))
+            try:
+                sets = ", ".join([f"{c} = ?" for c in set_cols])
+                params = [updates[c] for c in set_cols] + [mx_id]
+                cur.execute(f"UPDATE T_PYMX_ZZ SET {sets} WHERE F_ID = ?", tuple(params))
+            except Exception:
+                set_cols = [c for c in set_cols if c != "F_YHBC"]
+                if set_cols:
+                    sets = ", ".join([f"{c} = ?" for c in set_cols])
+                    params = [updates[c] for c in set_cols] + [mx_id]
+                    cur.execute(f"UPDATE T_PYMX_ZZ SET {sets} WHERE F_ID = ?", tuple(params))
 
-        # XHMSY 按传入项进行增改，并支持按ID删除
+        # 消化酶：入参 XHMSYJL 非 None 时按增量方式同步（忽略 XHMSYJL_DELETE），保留未变更记录的 F_ID
         xh_updated: List[int] = []
         xh_inserted: List[int] = []
         xh_deleted: List[int] = []
-        if xhmsy_delete_ids:
-            # 仅删除本明细下的指定记录
-            q_marks = ",".join(["?" for _ in xhmsy_delete_ids])
-            cur.execute(f"DELETE FROM T_XHMSY WHERE F_MXID = ? AND F_ID IN ({q_marks})", tuple([mx_id] + [int(i) for i in xhmsy_delete_ids]))
-            xh_deleted = [int(i) for i in xhmsy_delete_ids]
         if xhmsy_list is not None:
-            now = _now()
-            for e in (xhmsy_list or []):
-                fid = e.get("F_ID")
-                if fid is not None and str(fid).strip() != "":
-                    # update existing
-                    sets: List[str] = []
-                    params: List[Any] = []
-                    for k_src, k_col, fn in (
-                        ("F_XHM", "F_XHM", _clean_str),
-                        ("F_YL", "F_YL", _clean_num),
-                        ("F_ND", "F_ND", _clean_str),
-                        ("F_SYCS", "F_SYCS", _clean_int),
-                        ("F_XHWD", "F_XHWD", _clean_num),
-                        ("F_CZFS", "F_CZFS", _clean_str),
-                        ("F_LXSL", "F_LXSL", _clean_num),
-                        ("F_XHSJ", "F_XHSJ", _clean_num),
-                        ("F_BZ", "F_BZ", _clean_str),
-                    ):
-                        if k_src in e:
-                            v = fn(e.get(k_src))
-                            sets.append(f"{k_col} = ?")
-                            params.append(v)
-                    if sets:
-                        base_params = params.copy()
-                        sql_sets = f"UPDATE T_XHMSY SET {', '.join(sets)} WHERE F_MXID = ? AND F_ID = ?"
-                        params_with_mx = base_params + [mx_id, int(fid)]
-                        cur.execute(sql_sets, tuple(params_with_mx))
-                        success = True
-                        rowcount = getattr(cur, "rowcount", None)
-                        if rowcount is not None and rowcount == 0:
-                            # 兼容早期数据 F_MXID 为空的场景
-                            sql_fallback = f"UPDATE T_XHMSY SET {', '.join(sets)} WHERE F_ID = ?"
-                            params_with_id = base_params + [int(fid)]
-                            cur.execute(sql_fallback, tuple(params_with_id))
-                            rowcount2 = getattr(cur, "rowcount", None)
-                            success = rowcount2 is None or rowcount2 > 0
-                        if success:
-                            xh_updated.append(int(fid))
-                else:
-                    # insert new
-                    rec = {
-                        "F_GDID": gdid,
-                        "F_MXID": mx_id,
-                        "F_XHM": _clean_str((e or {}).get("F_XHM")),
-                        "F_YL": _clean_num((e or {}).get("F_YL")),
-                        "F_ND": _clean_str((e or {}).get("F_ND")),
-                        "F_SYCS": _clean_int((e or {}).get("F_SYCS")),
-                        "F_XHWD": _clean_num((e or {}).get("F_XHWD")),
-                        "F_CZFS": _clean_str((e or {}).get("F_CZFS")),
-                        "F_LXSL": _clean_num((e or {}).get("F_LXSL")),
-                        "F_XHSJ": _clean_num((e or {}).get("F_XHSJ")),
-                        "F_BZ": _clean_str((e or {}).get("F_BZ")),
-                    }
-                    cols2 = list(rec.keys())
-                    ph2 = ", ".join(["?" for _ in cols2])
-                    cur.execute(
-                        f"INSERT INTO T_XHMSY ({', '.join(cols2)}) VALUES ({ph2})",
-                        tuple(rec[c] for c in cols2),
-                    )
-                    try:
-                        cur.execute("SELECT MAX(F_ID) FROM T_XHMSY WHERE F_GDID = ? AND F_MXID = ?", (gdid, mx_id))
-                        xh_id = int(cur.fetchone()[0])
-                        xh_inserted.append(xh_id)
-                    except Exception:
-                        pass
+            xh_deleted, xh_inserted, xh_updated = _replace_xhmsy_for_mx(cur, gdid, mx_id, xhmsy_list or [])
 
+        synced_update = _sync_order_cell_totals_from_cdqxx(gdid, cdqxx, cur=cur)
         conn.commit()
+
+        try:
+            exist_fj_after = json.loads(updates.get("F_FJ") or current.get("F_FJ") or "[]")
+            fj_ids_out = [int(x) for x in exist_fj_after]
+        except Exception:
+            fj_ids_out = []
+
+        result = {
+            "F_MXID": mx_id,
+            "F_GDID": gdid,
+            "F_FJ_IDS": fj_ids_out,
+            "XHMSY_INSERTED_IDS": xh_inserted,
+            "XHMSY_UPDATED_IDS": xh_updated,
+            "XHMSY_DELETED_IDS": xh_deleted,
+        }
+        if synced_update:
+            result["order_cell_totals"] = synced_update
+        return result
     
-    # 查询工单信息（更新记录路径）
-    zzid = None
-    order_info = {}
-    try:
-        with adapter.connect() as conn_order:
-            cur_order = conn_order.cursor()
-            cur_order.execute("SELECT F_ZZID, F_GDBH, F_DCID, F_DC, F_PYSJ, F_SQR, F_XM, F_BRBH FROM T_PYGD WHERE F_ID = ?", (gdid,))
-            row_order = cur_order.fetchone()
-            if row_order:
-                zzid = row_order[0]
-                order_info = {
-                    "F_GDBH": row_order[1],
-                    "F_DCID": row_order[2],
-                    "F_DC": row_order[3],
-                    "F_PYSJ": row_order[4],
-                    "F_SQR": row_order[5],
-                    "F_XM": row_order[6],
-                    "F_BRBH": row_order[7]
-                }
-    except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"查询工单信息失败: {e}", exc_info=True)
-
-
-
 
 def get_mx_by_gdid(gdid: int) -> Dict[str, Any] | None:
     adapter = get_adapter()
@@ -761,10 +851,22 @@ def get_mx_by_gdid(gdid: int) -> Dict[str, Any] | None:
             "F_PYX_FRSJ": data.get("F_PYX_FRSJ"),
         }
         cdqxx = {
-            "F_CDQ_XBMD": data.get("F_CDQ_XBMD"),
+            "F_CDQXBZS": data.get("F_CDQXBZS"),
             "F_CDQ_XBHL": data.get("F_CDQ_XBHL"),
             "F_JZMD": data.get("F_JZMD"),
         }
+        # 细胞总数落在工单表，明细回显时一并带上，避免前端只能从 culture/detail 读
+        try:
+            cur.execute(
+                "SELECT F_CDQXBZS, F_FSQXBZS FROM T_PYGD WHERE F_ID = ?",
+                (gdid,),
+            )
+            tot = cur.fetchone()
+            if tot:
+                cdqxx["F_CDQXBZS"] = tot[0]
+                cdqxx["F_FSQXBZS"] = tot[1]
+        except Exception:
+            pass
 
         return {
             "F_GDID": gdid,
@@ -781,6 +883,66 @@ def get_mx_by_gdid(gdid: int) -> Dict[str, Any] | None:
             "F_FJ_IDS": fj_ids,
             "F_FJ": attachments,
         }
+
+
+def _sync_order_cell_totals_from_cdqxx(
+    gdid: int,
+    cdqxx: Dict[str, Any] | None,
+    cur=None,
+) -> Dict[str, Any]:
+    """
+    将 CDQXX 中的传代前/复苏前细胞总数同步到工单表 T_PYGD。
+
+    前端在传代-培养保存时把 F_CDQXBZS（及复苏场景的 F_FSQXBZS）放在 CDQXX 里，
+    工单创建编辑页从 culture/detail 读 T_PYGD，故需回写工单字段。
+
+    Args:
+        cur: 若传入则复用当前事务游标（不单独 commit）；否则自开连接并 commit。
+
+    Returns:
+        实际写入的字段字典，如 {"F_CDQXBZS": "36"}；无待同步字段时返回 {}。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if not cdqxx or not isinstance(cdqxx, dict):
+        return {}
+    sets: List[str] = []
+    params: List[Any] = []
+    written: Dict[str, Any] = {}
+    if "F_CDQXBZS" in cdqxx or "F_CDQ_XBMD" in cdqxx:
+        v = cdqxx.get("F_CDQXBZS")
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            v = cdqxx.get("F_CDQ_XBMD")
+        s = str(v).strip() if v is not None else ""
+        val = s if s != "" else None
+        sets.append("F_CDQXBZS = ?")
+        params.append(val)
+        written["F_CDQXBZS"] = val
+    if "F_FSQXBZS" in cdqxx:
+        v = cdqxx.get("F_FSQXBZS")
+        s = str(v).strip() if v is not None else ""
+        val = s if s != "" else None
+        sets.append("F_FSQXBZS = ?")
+        params.append(val)
+        written["F_FSQXBZS"] = val
+    if not sets:
+        return {}
+    params.append(int(gdid))
+    sql = f"UPDATE T_PYGD SET {', '.join(sets)} WHERE F_ID = ?"
+
+    if cur is not None:
+        cur.execute(sql, tuple(params))
+        logger.info(f"[培养明细] 同步工单细胞总数 gdid={gdid} values={written}")
+        return written
+
+    adapter = get_adapter()
+    with adapter.connect() as conn:
+        own_cur = conn.cursor()
+        own_cur.execute(sql, tuple(params))
+        conn.commit()
+    logger.info(f"[培养明细] 同步工单细胞总数 gdid={gdid} values={written}")
+    return written
 
 
 def save_mx(
@@ -800,6 +962,11 @@ def save_mx(
     operator: Optional[str],
 ) -> Dict[str, Any]:
     adapter = get_adapter()
+    old_detail_data_before_update = None  # ✅ 外层作用域定义，用于更新分支
+    old_xhmsy_list = []  # ✅ 外层作用域定义，用于质控对比
+    new_xhmsy_list = []  # ✅ 外层作用域定义，用于质控对比
+    synced_order_fields: Dict[str, Any] = {}
+    
     with adapter.connect() as conn:
         cur = conn.cursor()
         # 查是否已有明细
@@ -812,7 +979,7 @@ def save_mx(
         if not row:
             # 创建新记录
             now = _now()
-            main: Dict[str, Any] = {"F_GDID": gdid, "F_CZR": operator, "F_CZSJ": now}
+            main: Dict[str, Any] = {"F_GDID": gdid, "F_CZR": operator, "F_CZSJ": now, "F_YHBC": 1}
             if pyjtjjl:
                 main["F_PYJ_WD"] = _clean_num(pyjtjjl.get("F_PYJ_WD"))
                 main["F_PYJ_SD"] = _clean_num(pyjtjjl.get("F_PYJ_SD"))
@@ -859,8 +1026,8 @@ def save_mx(
                 main["F_PYX_HUM"] = _clean_num(pyxx_py.get("F_PYX_HUM"))
                 main["F_PYX_FRSJ"] = _clean_str(pyxx_py.get("F_PYX_FRSJ"))
             if cdqxx:
-                main["F_CDQ_XBMD"] = _clean_num(cdqxx.get("F_CDQ_XBMD"))
-                main["F_CDQ_XBHL"] = _clean_num(cdqxx.get("F_CDQ_XBHL"))
+                main["F_CDQXBZS"] = _cdqxbzs_from_cdqxx(cdqxx)
+                main["F_CDQ_XBHL"] = _clean_str(cdqxx.get("F_CDQ_XBHL"))
                 main["F_JZMD"] = _clean_str(cdqxx.get("F_JZMD"))
             if qxycf is not None:
                 main["F_QXYCF"] = _clean_str(qxycf)
@@ -883,11 +1050,19 @@ def save_mx(
             main["F_FJ"] = _json_dumps(sorted(list({int(x) for x in fj_ids})))
 
             cols = list(main.keys())
-            placeholders = ", ".join(["?" for _ in cols])
-            cur.execute(
-                f"INSERT INTO T_PYMX_ZZ ({', '.join(cols)}) VALUES ({placeholders})",
-                tuple(main[c] for c in cols),
-            )
+            try:
+                placeholders = ", ".join(["?" for _ in cols])
+                cur.execute(
+                    f"INSERT INTO T_PYMX_ZZ ({', '.join(cols)}) VALUES ({placeholders})",
+                    tuple(main[c] for c in cols),
+                )
+            except Exception:
+                cols = [c for c in cols if c != "F_YHBC"]
+                placeholders = ", ".join(["?" for _ in cols])
+                cur.execute(
+                    f"INSERT INTO T_PYMX_ZZ ({', '.join(cols)}) VALUES ({placeholders})",
+                    tuple(main[c] for c in cols),
+                )
             cur.execute("SELECT MAX(F_ID) FROM T_PYMX_ZZ WHERE F_GDID = ?", (gdid,))
             mx_id = int(cur.fetchone()[0])
 
@@ -925,6 +1100,8 @@ def save_mx(
                     except Exception:
                         pass
 
+            # 与明细同事务回写工单细胞总数，避免事务外同步失败被静默忽略
+            synced_order_fields = _sync_order_cell_totals_from_cdqxx(gdid, cdqxx, cur=cur)
             conn.commit()
         
         else:
@@ -935,8 +1112,16 @@ def save_mx(
             
             # 保存旧数据用于变更对比
             old_data = current.copy()
+            
+            # ✅ 在更新前获取完整的旧详情数据（用于F_OLD_DATA）
+            try:
+                old_detail_data_before_update = _get_full_culture_detail_by_gdid(gdid)
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"[培养明细质控] 获取更新前详情数据失败: {e}")
 
-            updates: Dict[str, Any] = {"F_CZR": operator, "F_CZSJ": _now()}
+            updates: Dict[str, Any] = {"F_CZR": operator, "F_CZSJ": _now(), "F_YHBC": 1}
 
             if pyjtjjl:
                 updates["F_PYJ_WD"] = _clean_num(pyjtjjl.get("F_PYJ_WD"))
@@ -959,8 +1144,8 @@ def save_mx(
                 updates["F_PYX_HUM"] = _clean_num(pyxx_py.get("F_PYX_HUM"))
                 updates["F_PYX_FRSJ"] = _clean_str(pyxx_py.get("F_PYX_FRSJ"))
             if cdqxx:
-                updates["F_CDQ_XBMD"] = _clean_num(cdqxx.get("F_CDQ_XBMD"))
-                updates["F_CDQ_XBHL"] = _clean_num(cdqxx.get("F_CDQ_XBHL"))
+                updates["F_CDQXBZS"] = _cdqxbzs_from_cdqxx(cdqxx)
+                updates["F_CDQ_XBHL"] = _clean_str(cdqxx.get("F_CDQ_XBHL"))
                 updates["F_JZMD"] = _clean_str(cdqxx.get("F_JZMD"))
             if qxycf is not None:
                 updates["F_QXYCF"] = _clean_str(qxycf)
@@ -988,141 +1173,68 @@ def save_mx(
                             pass
             updates["F_FJ"] = _json_dumps(sorted(list(exist_set)))
 
-            # JZJ 合并（支持删除/增改）
-            try:
-                exist_jzj = json.loads(current.get("F_JZJ") or "[]")
-            except Exception:
-                exist_jzj = []
-            by_id = {int(it.get("F_ID")): it for it in exist_jzj if it.get("F_ID") is not None}
-            max_id = max([int(it.get("F_ID")) for it in exist_jzj if it.get("F_ID") is not None] + [0])
-            if jzj_delete_ids:
-                delset = {int(x) for x in jzj_delete_ids if x is not None}
-                exist_jzj = [it for it in exist_jzj if int(it.get("F_ID") or 0) not in delset]
-                by_id = {int(it.get("F_ID")): it for it in exist_jzj if it.get("F_ID") is not None}
+            # 基质胶：入参含 F_JZJ 时全量替换（忽略 JZJ_IDS_DELETE）
             if pyxx_pb:
-                if pyxx_pb.get("F_PYBBH") is not None:
-                    updates["F_PYBBH"] = _clean_str(pyxx_pb.get("F_PYBBH"))
-                if pyxx_pb.get("F_JZKBS") is not None:
-                    updates["F_JZKBS"] = _clean_num(pyxx_pb.get("F_JZKBS"))
-                if pyxx_pb.get("F_DKJZTJ") is not None:
-                    updates["F_DKJZTJ"] = _clean_num(pyxx_pb.get("F_DKJZTJ"))
-                if pyxx_pb.get("F_CJWD") is not None:
-                    updates["F_CJWD"] = _clean_num(pyxx_pb.get("F_CJWD"))
-                if pyxx_pb.get("F_CJSJ") is not None:
-                    updates["F_CJSJ"] = _clean_num(pyxx_pb.get("F_CJSJ"))
-                items = pyxx_pb.get("F_JZJ")
-                if items is not None:
-                    if isinstance(items, dict):
-                        items = [items]
-                    for it in items or []:
-                        fid = it.get("F_ID")
-                        if fid is not None and str(fid).strip() != "":
-                            try:
-                                fid_int = int(fid)
-                                base = by_id.get(fid_int)
-                                if base is None:
-                                    base = {"F_ID": fid_int}
-                                    exist_jzj.append(base)
-                                base["F_JZJ"] = _clean_str(it.get("F_JZJ"))
-                                base["F_YL"] = _clean_num(it.get("F_YL"))
-                                base["F_ND"] = _clean_str(it.get("F_ND"))
-                                by_id[fid_int] = base
-                            except Exception:
-                                pass
-                        else:
-                            max_id += 1
-                            exist_jzj.append({
-                                "F_ID": max_id,
-                                "F_JZJ": _clean_str(it.get("F_JZJ")),
-                                "F_YL": _clean_num(it.get("F_YL")),
-                                "F_ND": _clean_str(it.get("F_ND")),
-                            })
-            updates["F_JZJ"] = _json_dumps(exist_jzj)
+                _apply_pyxx_pb_scalars(updates, pyxx_pb)
+                if "F_JZJ" in pyxx_pb:
+                    updates["F_JZJ"] = _json_dumps(
+                        _build_jzj_items_full_replace(pyxx_pb.get("F_JZJ"))
+                    )
 
-            # 执行更新
+            # 执行更新（F_YHBC 未迁移时降级）
             set_cols = [k for k, v in updates.items() if v is not None]
             if set_cols:
-                sets = ", ".join([f"{c} = ?" for c in set_cols])
-                params = [updates[c] for c in set_cols] + [mx_id]
-                cur.execute(f"UPDATE T_PYMX_ZZ SET {sets} WHERE F_ID = ?", tuple(params))
+                try:
+                    sets = ", ".join([f"{c} = ?" for c in set_cols])
+                    params = [updates[c] for c in set_cols] + [mx_id]
+                    cur.execute(f"UPDATE T_PYMX_ZZ SET {sets} WHERE F_ID = ?", tuple(params))
+                except Exception:
+                    set_cols = [c for c in set_cols if c != "F_YHBC"]
+                    if set_cols:
+                        sets = ", ".join([f"{c} = ?" for c in set_cols])
+                        params = [updates[c] for c in set_cols] + [mx_id]
+                        cur.execute(f"UPDATE T_PYMX_ZZ SET {sets} WHERE F_ID = ?", tuple(params))
 
-            # XHMSY 增改删
+            # 消化酶：入参 XHMSYJL 非 None 时按增量方式同步（忽略 XHMSYJL_DELETE），
+            # 保留内容未变更记录的 F_ID，避免质控记录误判为"变更"
             xh_updated: List[int] = []
             xh_inserted: List[int] = []
             xh_deleted: List[int] = []
-            if xhmsy_delete_ids:
-                q_marks = ",".join(["?" for _ in xhmsy_delete_ids])
-                cur.execute(
-                    f"DELETE FROM T_XHMSY WHERE F_MXID = ? AND F_ID IN ({q_marks})",
-                    tuple([mx_id] + [int(i) for i in xhmsy_delete_ids]),
-                )
-                xh_deleted = [int(i) for i in xhmsy_delete_ids]
-            if xhmsy_list is not None:
-                now2 = _now()
-                for e in (xhmsy_list or []):
-                    fid = e.get("F_ID")
-                    if fid is not None and str(fid).strip() != "":
-                        # update existing
-                        sets2: List[str] = []
-                        params2: List[Any] = []
-                        for k_src, k_col, fn in (
-                            ("F_XHM", "F_XHM", _clean_str),
-                            ("F_YL", "F_YL", _clean_num),
-                            ("F_ND", "F_ND", _clean_str),
-                            ("F_SYCS", "F_SYCS", _clean_int),
-                            ("F_XHWD", "F_XHWD", _clean_num),
-                            ("F_CZFS", "F_CZFS", _clean_str),
-                            ("F_LXSL", "F_LXSL", _clean_num),
-                            ("F_XHSJ", "F_XHSJ", _clean_num),
-                            ("F_BZ", "F_BZ", _clean_str),
-                        ):
-                            if k_src in e:
-                                v = fn(e.get(k_src))
-                                sets2.append(f"{k_col} = ?")
-                                params2.append(v)
-                        if sets2:
-                            base_params2 = params2.copy()
-                            sql_sets2 = f"UPDATE T_XHMSY SET {', '.join(sets2)} WHERE F_MXID = ? AND F_ID = ?"
-                            params_with_mx2 = base_params2 + [mx_id, int(fid)]
-                            cur.execute(sql_sets2, tuple(params_with_mx2))
-                            success2 = True
-                            rowcount = getattr(cur, "rowcount", None)
-                            if rowcount is not None and rowcount == 0:
-                                sql_fallback2 = f"UPDATE T_XHMSY SET {', '.join(sets2)} WHERE F_ID = ?"
-                                params_with_id2 = base_params2 + [int(fid)]
-                                cur.execute(sql_fallback2, tuple(params_with_id2))
-                                rowcount2 = getattr(cur, "rowcount", None)
-                                success2 = rowcount2 is None or rowcount2 > 0
-                            if success2:
-                                xh_updated.append(int(fid))
-                    else:
-                        rec2 = {
-                            "F_GDID": gdid,
-                            "F_MXID": mx_id,
-                            "F_XHM": _clean_str((e or {}).get("F_XHM")),
-                            "F_YL": _clean_num((e or {}).get("F_YL")),
-                            "F_ND": _clean_str((e or {}).get("F_ND")),
-                            "F_SYCS": _clean_int((e or {}).get("F_SYCS")),
-                            "F_XHWD": _clean_num((e or {}).get("F_XHWD")),
-                            "F_CZFS": _clean_str((e or {}).get("F_CZFS")),
-                            "F_LXSL": _clean_num((e or {}).get("F_LXSL")),
-                            "F_XHSJ": _clean_num((e or {}).get("F_XHSJ")),
-                            "F_BZ": _clean_str((e or {}).get("F_BZ")),
-                        }
-                        cols3 = list(rec2.keys())
-                        ph3 = ", ".join(["?" for _ in cols3])
-                        cur.execute(
-                            f"INSERT INTO T_XHMSY ({', '.join(cols3)}) VALUES ({ph3})",
-                            tuple(rec2[c] for c in cols3),
-                        )
-                        try:
-                            cur.execute("SELECT MAX(F_ID) FROM T_XHMSY WHERE F_GDID = ? AND F_MXID = ?", (gdid, mx_id))
-                            xh_id = int(cur.fetchone()[0])
-                            xh_inserted.append(xh_id)
-                        except Exception:
-                            pass
 
+            # 先查询现有消化酶（用于质控对比）
+            cur.execute(
+                "SELECT * FROM T_XHMSY WHERE F_GDID = ? AND F_MXID = ? ORDER BY F_ID ASC",
+                (gdid, mx_id),
+            )
+            old_xhmsy_rows = cur.fetchall()
+            old_xhmsy_cols = [c[0] for c in cur.description] if cur.description else []
+            old_xhmsy_list = []
+            for row in old_xhmsy_rows:
+                xh_data = dict(zip(old_xhmsy_cols, row))
+                xh_data = _convert_decimals(xh_data)
+                old_xhmsy_list.append(xh_data)
+
+            if xhmsy_list is not None:
+                xh_deleted, xh_inserted, xh_updated = _replace_xhmsy_for_mx(
+                    cur, gdid, mx_id, xhmsy_list or []
+                )
+
+            # 与明细同事务回写工单细胞总数
+            synced_order_fields = _sync_order_cell_totals_from_cdqxx(gdid, cdqxx, cur=cur)
             conn.commit()
+
+            # commit 后查询新消化酶列表（用于质控对比）
+            cur.execute(
+                "SELECT * FROM T_XHMSY WHERE F_GDID = ? AND F_MXID = ? ORDER BY F_ID ASC",
+                (gdid, mx_id),
+            )
+            new_xhmsy_rows = cur.fetchall()
+            new_xhmsy_cols = [c[0] for c in cur.description] if cur.description else []
+            new_xhmsy_list = []
+            for row in new_xhmsy_rows:
+                xh_data = dict(zip(new_xhmsy_cols, row))
+                xh_data = _convert_decimals(xh_data)
+                new_xhmsy_list.append(xh_data)
     
     # ========== 查询工单信息（新增/更新都需要） ==========
     zzid = None
@@ -1130,7 +1242,7 @@ def save_mx(
     try:
         with adapter.connect() as conn_order:
             cur_order = conn_order.cursor()
-            cur_order.execute("SELECT F_ZZID, F_GDBH, F_DCID, F_DC, F_PYSJ, F_SQR, F_XM, F_BRBH FROM T_PYGD WHERE F_ID = ?", (gdid,))
+            cur_order.execute("SELECT F_ZZID, F_GDBH, F_DCID, F_DC, F_PYSJ, F_SQR, F_XM, F_BRBH, F_YBLY FROM T_PYGD WHERE F_ID = ?", (gdid,))
             row_order = cur_order.fetchone()
             if row_order:
                 zzid = row_order[0]
@@ -1141,7 +1253,8 @@ def save_mx(
                     "F_PYSJ": row_order[4],
                     "F_SQR": row_order[5],
                     "F_XM": row_order[6],
-                    "F_BRBH": row_order[7]
+                    "F_BRBH": row_order[7],
+                    "F_YBLY": row_order[8]
                 }
     except Exception as e:
         import logging
@@ -1167,9 +1280,10 @@ def save_mx(
         print(f"错误: 同步到T_YCL失败 - {e}")
         import traceback
         traceback.print_exc()
-    
+
     # ========== 创建质控审核记录（新增/更新都需要） ==========
     qc_audit_id = None
+
     if zzid and operator:
         try:
             from app.crud.qc_audit import create_qc_audit_record, get_sample_basic_info, calculate_changes
@@ -1182,11 +1296,12 @@ def save_mx(
             # ✅ 获取完整的旧详情数据（用于F_OLD_DATA字段）
             old_detail_data = None
             if not is_new_record:
-                try:
-                    old_detail_data = _get_full_culture_detail_by_gdid(gdid)
-                    logger.info(f"[培养明细质控] 成功获取旧详情数据用于备份，工单ID: {gdid}")
-                except Exception as e:
-                    logger.warning(f"[培养明细质控] 获取旧详情数据失败: {e}")
+                # 编辑操作：使用更新前获取的详情数据
+                old_detail_data = old_detail_data_before_update
+                if old_detail_data:
+                    logger.info(f"[培养明细质控] 使用更新前的旧详情数据，工单ID: {gdid}")
+                else:
+                    logger.warning(f"[培养明细质控] 更新前的旧详情数据为空，工单ID: {gdid}")
             
             # 判断是新增还是更新
             if is_new_record:
@@ -1200,12 +1315,38 @@ def save_mx(
                         "标本号": zzid
                     }
                 }
+                
+                # ✅ 新增操作：获取新增后的完整详情数据（包含工单信息和培养明细）
+                try:
+                    old_detail_data = _get_full_culture_detail_by_gdid(gdid)
+                    logger.info(f"[培养明细质控] 新增操作：成功获取新详情数据用于记录，工单ID: {gdid}")
+                except Exception as e:
+                    logger.warning(f"[培养明细质控] 新增操作：获取新详情数据失败: {e}")
+                    old_detail_data = None
             else:
                 # 更新分支
                 bglx = "修改"
                 changes = calculate_changes(old_data, updates)
+                
+                # ✅ 对比消化酶使用记录的新旧列表
+                if old_xhmsy_list or new_xhmsy_list:
+                    # 对比新旧列表是否有差异
+                    xhmsy_changed = json.dumps(old_xhmsy_list, ensure_ascii=False, sort_keys=True) != \
+                                   json.dumps(new_xhmsy_list, ensure_ascii=False, sort_keys=True)
+                    
+                    if xhmsy_changed:
+                        # 有差异，添加到变更字段
+                        if not changes.get("变更字段"):
+                            changes["变更字段"] = []
+                        changes["变更字段"].append({
+                            "field": "XHMSYJL",
+                            "label": "消化酶使用记录",
+                            "old_value": old_xhmsy_list,
+                            "new_value": new_xhmsy_list
+                        })
+                
                 if not changes.get("变更字段"):
-                    # 没有实际变更，不创建质控记录
+                    # 没有任何实际变更，不创建质控记录
                     logger.info(f"[培养明细质控] 培养明细未变更，跳过质控记录创建 (工单ID: {gdid})")
                     qc_audit_id = None
                     changes = None
@@ -1259,6 +1400,9 @@ def save_mx(
             "XHMSY_UPDATED_IDS": xh_updated,
             "XHMSY_DELETED_IDS": xh_deleted,
         }
+
+    if synced_order_fields:
+        result["order_cell_totals"] = synced_order_fields
     
     if qc_audit_id:
         result["qc_audit_id"] = qc_audit_id

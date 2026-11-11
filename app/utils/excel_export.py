@@ -140,6 +140,9 @@ def export_culture_orders_to_excel(
         保存的文件路径
     """
     exporter = ExcelExporter(title=title)
+
+    from app.core.pseudonym import apply_pseudonym
+    data = apply_pseudonym(data) or []
     
     # 定义表头
     headers = [
@@ -155,6 +158,8 @@ def export_culture_orders_to_excel(
         "取样方式",
         "样本来源",
         "样本规格",
+        "传代前细胞总数",
+        "复苏前细胞总数",
         "工单类型",
         "工单状态",
         "审核状态",
@@ -189,6 +194,8 @@ def export_culture_orders_to_excel(
                 item.get("F_QYFS", ""),
                 item.get("F_YBLY", ""),
                 item.get("F_YBGG", ""),
+                item.get("F_CDQXBZS", ""),
+                item.get("F_FSQXBZS", ""),
                 item.get("F_GDLX", ""),
                 item.get("F_GDZT", ""),
                 item.get("F_SHZT", ""),

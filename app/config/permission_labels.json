@@ -2,11 +2,15 @@
   "root_id": "organbank",
   "labels": {
     "organbank": "类器官样本库管理系统",
+    "home": "首页",
     "sample_receive": "样本接收",
     "organoid_culture_tissue": "组织细胞培养",
+    "sample_inbound": "样本入库",
     "organoid_culture_blood": "血液细胞培养",
     "organoid_qc": "类器官质控",
     "organoid_identification": "类器官鉴定",
+    "shortcut_workbenches": "快捷工位",
+    "animal_experiment": "动物实验",
     "drug_assay": "药物实验",
     "reports": "统计报表",
     "qc_review": "质控审核",
@@ -17,7 +21,18 @@
     "user_mgmt": "用户管理",
     "role_mgmt": "角色管理",
     "unified_search": "综合查询",
-    "op_log": "日志管理"
+    "wax_block_mgmt": "蜡块管理",
+    "pipeline": "流水线",
+    "pipeline_mgmt": "流水线管理",
+    "outbound_mgmt": "出库管理",
+    "container_mgmt": "容器管理",
+    "stock_audit": "出入库审核",
+    "shortcut_workstation": "快捷工作台",
+    "op_log": "操作日志",
+    "dict_mgmt": "字典值管理",
+    "box_mgmt": "盒子管理",
+    "sampling_standard": "采集标准",
+    "automated_dashboard": "自动化看板"
   }
 }
 

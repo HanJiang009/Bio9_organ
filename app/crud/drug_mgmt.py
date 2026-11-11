@@ -24,6 +24,7 @@ def check_drug_exists(ywmc: str) -> Dict[str, Any]:
     with adapter.connect() as conn:
         cur = conn.cursor()
         
+        ywmc = (ywmc or "").strip()
         # 查询同名药物
         cur.execute("""
             SELECT F_ID, F_YWBH, F_YWMC 
@@ -52,47 +53,51 @@ def check_drug_exists(ywmc: str) -> Dict[str, Any]:
 
 
 def _generate_drug_code(cur) -> str:
-    """生成药物编号（YW001、YW002...）
-    
-    Args:
-        cur: 数据库游标
-        
-    Returns:
-        新的药物编号
-    """
-    # 查询当前最大编号
-    cur.execute("SELECT MAX(F_YWBH) FROM T_YWGL")
-    max_code = cur.fetchone()[0]
-    
-    if not max_code:
-        # 第一个药物
-        return "YW001"
-    
-    # 提取数字部分
-    try:
-        num_part = int(max_code[2:])  # 去掉"YW"前缀
-        new_num = num_part + 1
-        return f"YW{new_num:03d}"  # 格式化为3位数字
-    except Exception:
-        # 如果解析失败，返回默认值
-        return "YW001"
+    """生成药物编号（YW001、YW002...），按数字部分取最大，避免字符串 MAX 错序。"""
+    cur.execute("SELECT F_YWBH FROM T_YWGL WHERE F_YWBH LIKE 'YW%'")
+    max_num = 0
+    for row in cur.fetchall() or []:
+        code = row[0] if row else None
+        if not code:
+            continue
+        try:
+            max_num = max(max_num, int(str(code)[2:]))
+        except (TypeError, ValueError):
+            continue
+    return f"YW{max_num + 1:03d}"
+
+
+def _require_new_drug_name(cur, ywmc: str) -> str:
+    name = (ywmc or "").strip()
+    if not name:
+        raise ValueError("药物名称不能为空")
+    cur.execute(
+        "SELECT F_ID, F_YWBH FROM T_YWGL WHERE F_YWMC = ?",
+        (name,),
+    )
+    row = cur.fetchone()
+    if row:
+        raise ValueError("已存在该药物，请直接入库")
+    return name
 
 
 def create_drug(data: Dict[str, Any]) -> Dict[str, Any]:
-    """创建药物
-    
-    Args:
-        data: 药物数据
-        
-    Returns:
-        创建的药物信息
-    """
+    """创建药物。同名拒绝；事务内锁表尾行，避免连点写出多条。"""
     adapter = get_adapter()
     now = datetime.now()
     
     with adapter.connect() as conn:
         cur = conn.cursor()
-        
+
+        # 串行化创建：后到的请求等锁，再做同名校验，避免慢网连点各写一条
+        try:
+            cur.execute("SELECT F_ID FROM T_YWGL ORDER BY F_ID DESC LIMIT 1 FOR UPDATE")
+        except Exception:
+            cur.execute("SELECT F_ID FROM T_YWGL ORDER BY F_ID DESC")
+
+        ywmc = _require_new_drug_name(cur, data.get("F_YWMC"))
+        data["F_YWMC"] = ywmc
+
         # 自动生成药物编号
         ywbh = _generate_drug_code(cur)
         
@@ -446,7 +451,34 @@ def list_drugs_simple(
             params.append(f"%{gsmc}%")
         
         where_sql = "WHERE " + " AND ".join(where_clauses)
+        # 查询总数
+        count_sql = f"SELECT COUNT(*) FROM T_YWGL {where_sql}"
+        cur.execute(count_sql, params)
+        total = cur.fetchone()[0]
 
+        # 查询数据（只返回 ID、编号、名称）
+        data_sql = f"""
+            SELECT F_ID, F_YWBH, F_YWMC 
+            FROM T_YWGL 
+            {where_sql}
+            ORDER BY F_ID DESC
+            OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+        """
+        cur.execute(data_sql, params + [skip, limit])
+        rows = cur.fetchall()
+        data = [
+            {
+                "F_ID": row[0],
+                "F_YWBH": row[1],
+                "F_YWMC": row[2]
+            }
+            for row in rows
+        ]
+        return {
+            "total": total,
+            "data": data
+        }
+    
 
 def list_reagents(
     ywbh: Optional[str] = None,
@@ -680,6 +712,21 @@ def create_inbound(data: Dict[str, Any]) -> Dict[str, Any]:
         
         drug_id, drug_type, drug_name = drug_row
         is_reagent = (drug_type == "试剂")
+
+        # 批次号校重：同一药物下不允许重复录入相同批次号
+        pch = data.get("F_PCH")
+        if pch is not None and str(pch).strip():
+            pch = str(pch).strip()
+            data["F_PCH"] = pch
+            cur.execute(
+                "SELECT F_RKDH FROM T_YW_RKD WHERE F_YWID = ? AND F_PCH = ?",
+                (drug_id, pch),
+            )
+            dup_row = cur.fetchone()
+            if dup_row:
+                raise ValueError(
+                    f"药物「{drug_name}」已存在批次号「{pch}」（入库单号：{dup_row[0]}），请勿重复入库"
+                )
         
         # 自动生成入库单号
         rkdh = _generate_inbound_code()

@@ -26,8 +26,7 @@ def save_shortcut(payload: ShortcutCreate):
     return ok(saved, "保存成功")
 
 
-@router.post("/user-enabled", response_model=ApiResponse[list], response_model_exclude_none=True,
-             dependencies=[Depends(require_roles(["role_mgmt"]))])
+@router.post("/user-enabled", response_model=ApiResponse[list], response_model_exclude_none=True)
 def list_user_enabled_shortcuts(payload: ShortcutQuery):
     if not payload.F_UID:
         return err("缺少用户ID: F_UID")

@@ -80,6 +80,7 @@ def save_thaw(
     # ========== 在事务前获取旧数据（用于质控变更比对） ==========
     old_fsjl_data = {}
     is_update = False
+    old_detail_data = None  # ✅ 在事务前捕获完整旧详情，避免事务提交后取到新数据
     
     with adapter.connect() as conn_check:
         cur_check = conn_check.cursor()
@@ -113,6 +114,11 @@ def save_thaw(
                 "F_PYX_HUM": exist_check[18],
                 "F_PYX_FRSJ": exist_check[19],
             }
+            # ✅ 事务提交前取完整旧详情（基质胶明细等删除后将不可恢复）
+            try:
+                old_detail_data = get_thaw_detail_by_gdid(gdid)
+            except Exception:
+                old_detail_data = None
     
     with adapter.connect() as conn:
         cur = conn.cursor()
@@ -123,8 +129,8 @@ def save_thaw(
         if not base_row:
             raise ValueError("复苏工单不存在")
         ybly = (base_row[1] or "").strip() if len(base_row) > 1 else ""
-        if ybly != "复苏":
-            raise ValueError("仅支持在样本来源为复苏的工单上录入复苏明细")
+        if ybly not in ("复苏", "原代复苏", "传代复苏"):
+            raise ValueError("仅支持在样本来源为复苏、原代复苏或传代复苏的工单上录入复苏明细")
 
         # 1) Upsert 主表 T_FSJL（按 F_GDID 一对一）
         sql = "SELECT F_ID, F_FJ, F_JZJ FROM T_FSJL WHERE F_GDID = ? ORDER BY F_ID DESC"
@@ -288,15 +294,6 @@ def save_thaw(
                 
                 gdbh, zzid, xm, brbh, zzbw, ybly, dcid, dc, pysj, sqr = row
                 
-                # ✅ 获取完整的旧详情数据（用于F_OLD_DATA字段）
-                old_detail_data = None
-                if is_update:
-                    try:
-                        old_detail_data = get_thaw_detail_by_gdid(gdid)
-                        logger.info(f"[复苏质控] 成功获取旧详情数据用于备份，工单ID: {gdid}")
-                    except Exception as e:
-                        logger.warning(f"[复苏质控] 获取旧详情数据失败: {e}")
-                
                 # 判断是新增还是修改
                 if is_update and fsjl is not None:
                     # 修改：对比新旧数据
@@ -326,42 +323,31 @@ def save_thaw(
                     
                     changes = calculate_changes(old_fsjl_data, new_fsjl_data)
                     
-                    # 添加基质胶明细变更信息
+                    # 基质胶明细：整体前后对比（无论新增/修改/删除，统一记录 F_JZJ 的完整变化）
                     if jzjmx or jzjmx_del_ids:
                         if "变更字段" not in changes:
                             changes["变更字段"] = []
-                        if jzjmx:
-                            changes["变更字段"].append({
-                                "field": "JZJMX",
-                                "field_name": "基质胶明细",
-                                "old_value": "",
-                                "new_value": f"更新{len(jzjmx)}条记录"
-                            })
-                        if jzjmx_del_ids:
-                            changes["变更字段"].append({
-                                "field": "JZJMX_删除",
-                                "field_name": "基质胶明细删除",
-                                "old_value": f"删除{len(jzjmx_del_ids)}条记录",
-                                "new_value": ""
-                            })
+                        changes["变更字段"].append({
+                            "field": "F_JZJ",
+                            "old_value": json.dumps(exist_jzj or [], ensure_ascii=False),
+                            "new_value": json.dumps(jzj_current or [], ensure_ascii=False),
+                        })
                     
-                    # 添加附件变更信息
+                    # 附件：借助 calculate_changes 自动将ID转换为含静态地址的对象数组
                     if add_file_ids or del_file_ids:
                         if "变更字段" not in changes:
                             changes["变更字段"] = []
-                        if add_file_ids:
+                        fj_diff = calculate_changes(
+                            {"F_FJ": exist_fj or []},
+                            {"F_FJ": final_fj_ids or []},
+                        )
+                        if isinstance(fj_diff.get("变更字段"), list) and fj_diff["变更字段"]:
+                            changes["变更字段"].extend(fj_diff["变更字段"])
+                        else:
                             changes["变更字段"].append({
-                                "field": "F_FJ_新增",
-                                "field_name": "附件新增",
-                                "old_value": "",
-                                "new_value": f"新增{len(add_file_ids)}个附件"
-                            })
-                        if del_file_ids:
-                            changes["变更字段"].append({
-                                "field": "F_FJ_删除",
-                                "field_name": "附件删除",
-                                "old_value": f"删除{len(del_file_ids)}个附件",
-                                "new_value": ""
+                                "field": "F_FJ",
+                                "old_value": exist_fj or [],
+                                "new_value": final_fj_ids or [],
                             })
                 else:
                     # 新增：记录关键信息
@@ -390,10 +376,17 @@ def save_thaw(
                     # 添加基质胶明细信息
                     if jzjmx:
                         changes["关键信息"]["基质胶明细数"] = len(jzjmx)
+                    
+                    # ✅ 新增操作：获取新增后的完整详情数据（作为 F_OLD_DATA）
+                    try:
+                        old_detail_data = get_thaw_detail_by_gdid(gdid)
+                        logger.info(f"[复苏质控] 成功获取新增后完整详情数据，工单ID: {gdid}")
+                    except Exception as e:
+                        logger.warning(f"[复苏质控] 获取新增后详情数据失败: {e}")
             
             # ✅ 创建质控审核记录，包含F_OLD_DATA
             qc_audit_id = create_qc_audit_record(
-                F_ZKJD="复苏",
+                F_ZKJD="培养",
                 F_BGLX=bglx,
                 F_ZZID=zzid,
                 F_CHANGES=changes,
@@ -466,34 +459,48 @@ def get_thaw_detail_by_gdid(gdid: int) -> Dict[str, Any] | None:
             # 将 FSJL.F_JZJ 也改为数组返回，避免转义字符串
             fsjl["F_JZJ"] = jzjmx
 
-        # 冻存信息 DCXX（部分字段）
-        parent_id = gdxx.get("F_PARENT_ID") if gdxx else None
-        try:
-            dc_target_id = int(parent_id) if parent_id not in (None, "", 0) else gdid
-        except Exception:
-            dc_target_id = gdid
-
-        sql = "SELECT F_CZR, F_DCRQ, F_DCY, F_DCQ_XBHL, F_DCQ_HXBSL FROM T_DCJL WHERE F_GDID = ? ORDER BY F_ID DESC"
-        paginated_sql, extra = adapter.paginate(sql, 0, 1)
-        cur.execute(paginated_sql, (dc_target_id,) + tuple(extra))
-        drow = cur.fetchone()
-        dcxx = None
-        if drow:
-            dcols = [c[0] for c in cur.description]
-            dcxx = dict(zip(dcols, drow))
-            # 时间字段转字符串
-            v = dcxx.get("F_DCRQ")
-            if v is not None:
-                try:
-                    dcxx["F_DCRQ"] = v.strftime("%Y-%m-%d %H:%M:%S") if hasattr(v, "strftime") else str(v)
-                except Exception:
-                    dcxx["F_DCRQ"] = str(v)
-
         return {
             "GDXX": gdxx,
             "FSJL": fsjl,
             "JZJMX": jzjmx,
-            "DCXX": dcxx,
+            "DCXX": get_dcxx_by_gdid(gdid, gdxx.get("F_PARENT_ID")),
         }
 
+
+def get_dcxx_by_gdid(gdid: int, parent_id: Any = None) -> Optional[Dict[str, Any]]:
+    """
+    查询冻存摘要信息（与 /organoid-thaw/detail 的 DCXX 结构一致）。
+    复苏类子工单优先从 F_PARENT_ID 关联的父工单读取 T_DCJL。
+    """
+    try:
+        dc_target_id = int(parent_id) if parent_id not in (None, "", 0) else int(gdid)
+    except Exception:
+        dc_target_id = int(gdid)
+
+    adapter = get_adapter()
+    with adapter.connect() as conn:
+        cur = conn.cursor()
+        sql = (
+            "SELECT F_CZR, F_DCRQ, F_DCY, F_DCQ_XBHL, F_DCQ_HXBSL "
+            "FROM T_DCJL WHERE F_GDID = ? ORDER BY F_ID DESC"
+        )
+        paginated_sql, extra = adapter.paginate(sql, 0, 1)
+        cur.execute(paginated_sql, (dc_target_id,) + tuple(extra))
+        drow = cur.fetchone()
+        if not drow:
+            return None
+        dcols = [c[0] for c in cur.description]
+        dcxx = dict(zip(dcols, drow))
+
+    v = dcxx.get("F_DCRQ")
+    if v is not None:
+        try:
+            dcxx["F_DCRQ"] = v.strftime("%Y-%m-%d %H:%M:%S") if hasattr(v, "strftime") else str(v)
+        except Exception:
+            dcxx["F_DCRQ"] = str(v)
+    for k in ("F_DCQ_XBHL", "F_DCQ_HXBSL", "F_DCY"):
+        val = dcxx.get(k)
+        if val is not None:
+            dcxx[k] = str(val)
+    return dcxx
 

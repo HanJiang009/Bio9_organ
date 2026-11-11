@@ -22,6 +22,7 @@ import requests
 
 from app.crud.culture_detail_report import assemble_culture_detail_report
 from app.core.settings import settings
+from app.core.docx_pdf import convert_docx_to_pdf
 from app.crud.file_center import insert_file_record
 
 
@@ -533,7 +534,7 @@ def generate_culture_detail_pdf(gdid: int, operator: str = None) -> Dict[str, An
         FileNotFoundError: 模板文件不存在
     """
     # 1. 获取报告数据
-    report_data = assemble_culture_detail_report(gdid)
+    report_data = assemble_culture_detail_report(gdid, allow_unqualified=True)
     
     # 2. 检查模板文件
     base_dir = Path(__file__).resolve().parents[1]  # Bio9_organ/app
@@ -569,98 +570,61 @@ def generate_culture_detail_pdf(gdid: int, operator: str = None) -> Dict[str, An
     temp_docx_path = temp_dir / temp_docx_name
     doc.save(str(temp_docx_path))
     
-    # 9. 转换为PDF（使用docx2pdf或其他工具）
+    # 9. 转换为PDF（Windows Word COM 或 LibreOffice）
+    pdf_name = f"culture_detail_{gdbh}_{timestamp}.pdf"
+    pdf_dir = upload_dir / "pdf"
+    pdf_dir.mkdir(exist_ok=True)
+    pdf_path = pdf_dir / pdf_name
+
     try:
-        from docx2pdf import convert
-        pdf_name = f"culture_detail_{gdbh}_{timestamp}.pdf"
-        
-        # 保存到uploads目录
-        pdf_dir = upload_dir / "pdf"
-        pdf_dir.mkdir(exist_ok=True)
-        pdf_path = pdf_dir / pdf_name
-        
+        convert_docx_to_pdf(temp_docx_path, pdf_path)
+
+        relative_path = f"pdf/{pdf_name}"
+        file_id = insert_file_record(
+            path=relative_path,
+            original_name=pdf_name
+        )
+
         try:
-            convert(str(temp_docx_path), str(pdf_path))
-            
-            # 保存文件记录
-            relative_path = f"pdf/{pdf_name}"
-            file_id = insert_file_record(
-                path=relative_path,
-                original_name=pdf_name
-            )
-            
-            # 保存PDF文件ID到工单表
-            try:
-                from app.crud.order_pdf_manager import set_generated_pdf
-                set_generated_pdf(gdid, file_id)
-                print(f"调试: 已保存PDF文件ID {file_id} 到工单 {gdid}")
-            except Exception as e:
-                print(f"警告: 保存PDF文件ID到工单失败: {e}")
-            
-            # 清理临时文件
-            try:
-                os.remove(str(temp_docx_path))
-                # 清理下载的图片（预处理、观察记录附件）
-                for f in temp_dir.glob("preprocess_*.jpg"):
-                    os.remove(str(f))
-                for f in temp_dir.glob("obs_*.jpg"):
-                    os.remove(str(f))
-            except Exception:
-                pass
-            
-            return {
-                "file_id": file_id,
-                "filename": pdf_name,
-                "file_path": relative_path,
-                "file_url": f"/{relative_path}",
-                "gdid": gdid,
-                "gdbh": gdbh,
-                "format": "pdf",
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
+            from app.crud.order_pdf_manager import set_generated_pdf
+            set_generated_pdf(gdid, file_id)
+            print(f"调试: 已保存PDF文件ID {file_id} 到工单 {gdid}")
         except Exception as e:
-            # PDF转换失败，返回docx文件
-            print(f"PDF转换失败: {str(e)}，返回docx文件")
-            # 移动到uploads目录
-            doc_dir = upload_dir / "docs"
-            doc_dir.mkdir(exist_ok=True)
-            final_docx_path = doc_dir / temp_docx_name
-            
-            shutil.move(str(temp_docx_path), str(final_docx_path))
-            
-            relative_path = f"docs/{temp_docx_name}"
-            file_id = insert_file_record(
-                path=relative_path,
-                original_name=temp_docx_name
-            )
-            
-            return {
-                "file_id": file_id,
-                "filename": temp_docx_name,
-                "file_path": relative_path,
-                "file_url": f"/{relative_path}",
-                "gdid": gdid,
-                "gdbh": gdbh,
-                "format": "docx",
-                "note": f"PDF转换失败({str(e)})，生成的是Word文档",
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-    
-    except ImportError:
-        # 如果没有安装docx2pdf，返回docx文件
-        # 移动到uploads目录
+            print(f"警告: 保存PDF文件ID到工单失败: {e}")
+
+        try:
+            os.remove(str(temp_docx_path))
+            for f in temp_dir.glob("preprocess_*.jpg"):
+                os.remove(str(f))
+            for f in temp_dir.glob("obs_*.jpg"):
+                os.remove(str(f))
+        except Exception:
+            pass
+
+        return {
+            "file_id": file_id,
+            "filename": pdf_name,
+            "file_path": relative_path,
+            "file_url": f"/{relative_path}",
+            "gdid": gdid,
+            "gdbh": gdbh,
+            "format": "pdf",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except Exception as e:
+        print(f"PDF转换失败: {str(e)}，返回docx文件")
         doc_dir = upload_dir / "docs"
         doc_dir.mkdir(exist_ok=True)
         final_docx_path = doc_dir / temp_docx_name
-        
+
         shutil.move(str(temp_docx_path), str(final_docx_path))
-        
+
         relative_path = f"docs/{temp_docx_name}"
         file_id = insert_file_record(
             path=relative_path,
             original_name=temp_docx_name
         )
-        
+
         return {
             "file_id": file_id,
             "filename": temp_docx_name,
@@ -669,7 +633,7 @@ def generate_culture_detail_pdf(gdid: int, operator: str = None) -> Dict[str, An
             "gdid": gdid,
             "gdbh": gdbh,
             "format": "docx",
-            "note": "未安装docx2pdf，生成的是Word文档",
+            "note": f"PDF转换失败({str(e)})，生成的是Word文档",
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 

@@ -18,6 +18,10 @@ class UserOut(BaseModel):
     F_YXQ: str
     F_TOKEN: Optional[str] = None #联系电话
     F_ZT: Optional[str] = None
+    data_scope: Optional[str] = None  # 已废弃：不再有角色级一刀切
+    data_scopes: Optional[dict] = None  # 当前会话角色的模块数据权限 {菜单id: all|self}
+    F_JS_SELECTED: Optional[str] = None  # 当前会话角色名
+    F_JS_ACCOUNT: Optional[str] = None  # 账号绑定的全部角色（逗号串）
 
 
 class UserQuery(BaseModel):

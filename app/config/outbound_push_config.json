@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "mock_mode": true,
+  "timeout": 8,
+  "url": "http://localhost:5000/mock/outbound/notify"
+}

@@ -1,4 +1,5 @@
 from typing import List, Dict, Any, Optional
+import logging
 from fastapi import APIRouter, Depends, Form, File, UploadFile
 from fastapi.responses import StreamingResponse
 from app.schemas.common import ApiResponse
@@ -17,6 +18,7 @@ from app.core.storage import build_upload_path
 from app.crud.file_center import insert_file_record
 
 router = APIRouter(prefix="/drug-test/record", tags=["drug_test"])
+logger = logging.getLogger(__name__)
 
 
 def _resolve_operator(current_user: Dict[str, Any] | None) -> str | None:
@@ -63,6 +65,7 @@ async def save_experiment_record(
     
     ## 接口说明
     - 使用 `multipart/form-data` 格式
+    - **暂存接口**：只保存业务数据，**不创建** `T_ZKSH` 质控审核记录
     - JSON字段中使用 `F_FJ_INDEX` 标记附件位置，后端会自动替换为文件ID
     - 附件统一通过 `F_FJ` 数组上传，按索引 0, 1, 2... 映射
     
@@ -105,7 +108,9 @@ async def save_experiment_record(
     operator = _resolve_operator(current_user)
     
     try:
-        result = crud.save_experiment_record(data, file_ids, operator=operator)
+        result = crud.save_experiment_record(
+            data, file_ids, operator=operator, skip_qc=True
+        )
         return ok(result, "保存成功")
     except ValueError as ve:
         return err(str(ve))
@@ -119,7 +124,7 @@ async def save_experiment_record(
     response_model_exclude_none=True,
     dependencies=[Depends(require_roles(["drug_assay"]))],
 )
-def get_experiment_record_detail(payload: ExperimentRecordDetailQuery):
+def get_experiment_record_detail(payload: ExperimentRecordDetailQuery, current_user: dict = Depends(get_current_user_optional)):
     """
     获取实验记录详情（根据实验计划ID查询）
     
@@ -165,6 +170,10 @@ def get_experiment_record_detail(payload: ExperimentRecordDetailQuery):
     data = crud.get_experiment_record_by_plan(payload.F_SYJH_ID)
     if not data:
         return err("实验计划不存在")
+    from app.core.data_scope import deny_owner_access
+    denied = deny_owner_access(current_user, data.get("F_JLR") or data.get("F_SYR"), module="drug_assay")
+    if denied:
+        return denied
     return ok(data, "查询成功")
 
 
@@ -174,13 +183,15 @@ def get_experiment_record_detail(payload: ExperimentRecordDetailQuery):
     response_model_exclude_none=True,
     dependencies=[Depends(require_roles(["drug_assay"]))],
 )
-def list_experiment_records(payload: ExperimentRecordListQuery):
+def list_experiment_records(payload: ExperimentRecordListQuery, current_user: dict = Depends(get_current_user_optional)):
     """实验记录列表（分页）"""
+    from app.core.data_scope import resolve_data_scope
     keyword = (payload.keyword or "").strip() or None
     syjh_id = payload.F_SYJH_ID
     jlr = payload.F_JLR
     skip = payload.skip or 0
     limit = payload.limit or 20
+    scope = resolve_data_scope(current_user, "drug_assay")
 
     records = crud.list_experiment_records(
         skip=skip,
@@ -188,11 +199,15 @@ def list_experiment_records(payload: ExperimentRecordListQuery):
         syjh_id=syjh_id,
         jlr=jlr,
         keyword=keyword,
+        user=current_user,
+        scope=scope,
     )
     total = crud.count_experiment_records(
         syjh_id=syjh_id,
         jlr=jlr,
         keyword=keyword,
+        user=current_user,
+        scope=scope,
     )
     
     return ok(
@@ -385,8 +400,8 @@ async def submit_for_review(
     3. 审核通过后会自动生成药物试验报告PDF（功能待实现）
     
     ## 与普通保存的区别
-    - **普通保存**（`/save`）：只记录"药物实验记录"质控
-    - **提交复核**（`/submit-for-review`）：同时记录"药物实验记录"和"药物试验报告"质控
+    - **普通保存**（`/save`）：只保存数据，不写质控
+    - **提交复核**（`/submit-for-review`）：保存数据并创建 **"药物实验报告"** 质控记录
     
     ## 使用场景
     - 实验记录填写完成后，需要提交给质控人员审核
@@ -423,9 +438,11 @@ async def submit_for_review(
     
     operator = _resolve_operator(current_user)
     
-    # 3. 先保存实验记录（会自动记录"药物实验记录"质控）
+    # 3. 静默保存（不写中间质控，仅提交复核时创建报告质控）
     try:
-        save_result = crud.save_experiment_record(data, file_ids, operator=operator)
+        save_result = crud.save_experiment_record(
+            data, file_ids, operator=operator, skip_qc=True
+        )
     except Exception as e:
         return err(f"保存实验记录失败: {e}")
     
@@ -463,7 +480,7 @@ async def submit_for_review(
         }
         
         report_qc_id = create_qc_audit_record(
-            F_ZKJD="药物试验报告",
+            F_ZKJD="药物实验报告",
             F_BGLX="新增",
             F_ZZID=zzid,
             F_CHANGES=changes,
@@ -471,6 +488,7 @@ async def submit_for_review(
             F_GDID=gdid,
             F_XM=sample_info.get("F_XM"),
             F_BRBH=sample_info.get("F_BRBH"),
+            F_YBLY=gdxx.get("F_YBLY"),  # ✅ 从工单信息中获取样本来源
             F_GDBH=gdxx.get("F_GDBH"),
             F_DCID=gdxx.get("F_DCID"),
             F_DC=gdxx.get("F_DC"),
@@ -479,7 +497,16 @@ async def submit_for_review(
             F_OLD_DATA=record_detail
         )
         
-        # 5. 返回结果
+        # 5. 更新实验计划状态为"待审核"
+        try:
+            from app.crud.drug_test import update_test_plan_status
+            update_test_plan_status(syjh_id, "待审核")
+            logger.info(f"[提交复核] 已更新实验计划状态为'待审核'，计划ID: {syjh_id}")
+        except Exception as status_err:
+            logger.warning(f"[提交复核] 更新实验计划状态失败: {status_err}")
+            # 状态更新失败不影响主流程
+        
+        # 6. 返回结果
         return ok({
             "record_save_result": save_result,
             "record_qc_id": save_result.get("qc_audit_id"),
@@ -593,3 +620,85 @@ def preview_drug_test_report_data(payload: Dict[str, Any]):
     except Exception as e:
         logger.error(f"[药物试验报告预览] 组装报告数据失败: {e}", exc_info=True)
         return err(f"组装失败: {e}")
+
+
+@router.post(
+    "/generate-pdf",
+    response_model=ApiResponse[dict],
+    response_model_exclude_none=True,
+    dependencies=[Depends(require_roles(["drug_assay", "qc_review"]))],
+)
+def generate_pdf(payload: Dict[str, Any]):
+    """
+    主动生成药物试验报告PDF（测试/重新生成接口）
+    
+    ## 功能说明
+    根据实验计划ID生成完整的药物试验报告PDF，包含：
+    - 实验计划信息（组别、孔位、用药等）
+    - 培养工单信息
+    - 质量检测记录
+    - 观察记录列表
+    - 实验记录数据（包含8个复杂JSON字段的动态表格）
+    
+    ## 入参格式
+    ```json
+    {
+        "F_SYJH_ID": 20  // 实验计划ID（必填）
+    }
+    ```
+    
+    ## 返回格式
+    ```json
+    {
+        "code": 1,
+        "msg": "PDF生成成功",
+        "data": {
+            "success": true,
+            "pdf_path": "C:/xxx/temp_reports/drug_test_report_20_20260121153045.pdf",
+            "file_id": 2456,
+            "message": "PDF生成成功"
+        }
+    }
+    ```
+    
+    ## 使用场景
+    1. **开发测试**: 快速测试PDF生成功能，无需走完整的业务流程
+    2. **重新生成**: 质控审核后如果PDF生成失败，可以手动调用此接口重新生成
+    3. **预览查看**: 在正式提交复核前，先生成PDF预览效果
+    
+    ## 与业务流程的关系
+    - **业务流程**: 提交复核 → 质控审核通过 → 后台自动生成PDF
+    - **此接口**: 直接生成PDF，不依赖质控审核流程
+    
+    ## 注意事项
+    - 需要确保模板文件存在: `app/templates/drug_test_report_template.docx`
+    - 需要安装Microsoft Word（用于PDF转换）
+    - 生成的PDF会自动注册到文件中心
+    - PDF生成可能需要10-30秒，请耐心等待
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        syjh_id = int(payload.get("F_SYJH_ID"))
+    except (TypeError, ValueError):
+        return err("缺少或非法的实验计划ID (F_SYJH_ID)")
+    
+    try:
+        from app.crud.drug_test_report_pdf import generate_drug_test_report_pdf
+        
+        logger.info(f"[药物试验报告PDF] 开始生成PDF，实验计划ID: {syjh_id}")
+        
+        # 调用PDF生成函数（使用默认配置）
+        result = generate_drug_test_report_pdf(syjh_id=syjh_id)
+        
+        if result["success"]:
+            logger.info(f"[药物试验报告PDF] PDF生成成功，实验计划ID: {syjh_id}, 文件ID: {result['file_id']}")
+            return ok(result, "PDF生成成功")
+        else:
+            logger.error(f"[药物试验报告PDF] PDF生成失败，实验计划ID: {syjh_id}, 错误: {result['message']}")
+            return err(result["message"])
+            
+    except Exception as e:
+        logger.error(f"[药物试验报告PDF] 生成PDF异常: {e}", exc_info=True)
+        return err(f"生成PDF失败: {e}")

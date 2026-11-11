@@ -1,7 +1,16 @@
 from fastapi import APIRouter, Depends
 from typing import List
 from app.schemas.common import ApiResponse
-from app.schemas.role import RoleCreate, RoleUpdate, RoleQuery, RoleDelete, RoleListQuery, RoleUsersQuery
+from app.schemas.role import (
+    RoleCreate,
+    RoleUpdate,
+    RoleQuery,
+    RoleDelete,
+    RoleListQuery,
+    RoleUsersQuery,
+    RoleDataScopeToggle,
+    RolePseudonymSave,
+)
 from app.crud import role as crud
 from app.core.response import ok, err
 from app.core.auth import require_roles
@@ -34,6 +43,7 @@ def role_detail(payload: RoleQuery):
         data = crud.get_role_by_name(payload.F_JS)
     if not data:
         return err("角色不存在")
+    data["menus"] = crud.list_role_menus(data, only_permitted=True)
     return ok(data, "查询成功")
 
 # 创建角色
@@ -78,8 +88,7 @@ def role_names(_: dict = Depends(require_roles(["role_mgmt"]))):
 
 
 # 根据用户ID返回有权限模块列表
-@router.post("/permissions/by-user", response_model=ApiResponse[list], response_model_exclude_none=True,
-             dependencies=[Depends(require_roles(["role_mgmt"]))])
+@router.post("/permissions/by-user", response_model=ApiResponse[list], response_model_exclude_none=True)
 def list_permissions_by_user(payload: dict):
     uid = int(payload.get("F_UID") or payload.get("user_id") or 0)
     if not uid:
@@ -91,7 +100,9 @@ def list_permissions_by_user(payload: dict):
 @router.post("/permissions/tree", response_model=ApiResponse[dict], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["role_mgmt"]))])
 def get_permission_tree(payload: RoleQuery):
-    tree = crud.get_permission_tree(payload.F_ID)
+    if payload.F_ID is None:
+        return err("缺少角色ID: F_ID")
+    tree = crud.get_permission_tree_with_data_scope(payload.F_ID)
     if tree is None:
         return err("角色不存在")
     return ok(tree, "查询成功")
@@ -133,4 +144,49 @@ def toggle_shortcut(payload: dict):
     if not ok_flag:
         return err(message or "更新失败")
     return ok({"F_ID": role_id, "node_id": node_id, "shortcut": shortcut}, "更新成功")
+
+
+@router.post("/menus", response_model=ApiResponse[list], response_model_exclude_none=True,
+             dependencies=[Depends(require_roles(["role_mgmt"]))])
+def role_menus(payload: RoleQuery):
+    """选中角色后右侧菜单表：仅返回已开通权限的菜单及其数据权限。"""
+    data = None
+    if payload.F_ID is not None:
+        data = crud.get_role(payload.F_ID)
+    elif payload.F_JS:
+        data = crud.get_role_by_name(payload.F_JS)
+    if not data:
+        return err("角色不存在")
+    return ok(crud.list_role_menus(data, only_permitted=True), "查询成功")
+
+
+@router.post("/pseudonym/get", response_model=ApiResponse[dict], response_model_exclude_none=True,
+             dependencies=[Depends(require_roles(["role_mgmt"]))])
+def get_role_pseudonym(payload: RoleQuery):
+    """读取某个角色的伪名化配置。有角色管理权限即可，不限超级管理员。"""
+    if payload.F_ID is None:
+        return err("缺少角色ID: F_ID")
+    data = crud.get_role_pseudonym(payload.F_ID)
+    if not data:
+        return err("角色不存在")
+    return ok(data, "查询成功")
+
+
+@router.post("/pseudonym/save", response_model=ApiResponse[dict], response_model_exclude_none=True,
+             dependencies=[Depends(require_roles(["role_mgmt"]))])
+def save_role_pseudonym(payload: RolePseudonymSave):
+    """保存某个角色的伪名化。只影响使用该角色登录的会话。"""
+    ok_flag, message, data = crud.save_role_pseudonym(payload.F_ID, payload.enabled, payload.fields)
+    if not ok_flag:
+        return err(message or "保存失败")
+    return ok(data, "设置成功")
+
+
+@router.post("/data-scope/toggle", response_model=ApiResponse[dict], response_model_exclude_none=True,
+             dependencies=[Depends(require_roles(["role_mgmt"]))])
+def toggle_data_scope(payload: RoleDataScopeToggle):
+    ok_flag, message, data = crud.set_role_data_scope(payload.F_ID, payload.node_id, payload.F_SJQX)
+    if not ok_flag:
+        return err(message or "更新失败")
+    return ok(data, "更新成功")
 

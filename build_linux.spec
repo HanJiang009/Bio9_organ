@@ -15,13 +15,35 @@ from pathlib import Path
 
 # 项目根目录
 project_root = Path('.').resolve()
+parent_root = project_root.parent  # pywork 目录（用于找到 bio9_license）
 
-# 收集所有应用文件
+# ⚠️ bio9_license 通过 hiddenimports 和 hooks 自动打包，不要作为 datas 添加！
+# 作为 datas 会导致源码泄露，PyInstaller 会自动分析并编译为字节码
+bio9_license_path = parent_root / 'bio9_license'
+if bio9_license_path.exists():
+    print(f"✅ 找到 bio9_license 模块: {bio9_license_path}")
+    print(f"   将通过 PyInstaller 自动分析和编译（不泄露源码）")
+else:
+    print(f"⚠️  未找到 bio9_license 模块: {bio9_license_path}")
+
+# 收集所有数据文件（不包括 .py 源代码，PyInstaller 会自动编译）
 app_datas = [
-    ('app', 'app'),                      # 应用代码
-    ('app/templates', 'app/templates'),  # 模板文件
-    ('app/config', 'config'),            # 配置文件 - 直接放在程序根目录的 config/ 下
+    # ❌ 不要添加 ('app', 'app')，会导致源码泄露！
+    # ✅ 只添加真正的数据文件
+    ('app/templates', 'app/templates'),  # Word 模板文件
 ]
+
+# 检查并添加 static 静态文件（如果存在）
+static_path = project_root / 'static'
+if static_path.exists():
+    app_datas.append(('static', 'static'))
+    print(f"✅ 找到 static 目录: {static_path}")
+
+# 检查并添加 app/config 中的业务配置（示例数据等）
+app_config_path = project_root / 'app' / 'config'
+if app_config_path.exists():
+    app_datas.append(('app/config', 'app/config'))
+    print(f"✅ 找到 app/config 目录: {app_config_path}")
 
 # 收集额外的数据文件（如果存在）
 extra_files = [
@@ -41,6 +63,22 @@ if Path('PACKAGE_README.md').exists():
 
 # 隐藏导入（PyInstaller 可能无法自动检测的模块）
 hidden_imports = [
+    # ✅ Bio9 授权模块（重要！）
+    'bio9_license',
+    'bio9_license.fingerprint',
+    'bio9_license.license_manager',
+    'bio9_license.guard',
+    
+    # 加密相关（授权系统依赖）
+    'cryptography',
+    'cryptography.fernet',
+    'cryptography.hazmat',
+    'cryptography.hazmat.primitives',
+    'cryptography.hazmat.primitives.ciphers',
+    'cryptography.hazmat.backends',
+    'cryptography.hazmat.backends.openssl',
+    
+    # FastAPI 和 Web 服务
     'uvicorn',
     'uvicorn.logging',
     'uvicorn.loops',
@@ -102,7 +140,10 @@ block_cipher = None
 
 a = Analysis(
     ['run.py'],
-    pathex=[str(project_root)],
+    pathex=[
+        str(project_root),        
+        str(parent_root),       
+    ],
     binaries=[],
     datas=app_datas,
     hiddenimports=hidden_imports,

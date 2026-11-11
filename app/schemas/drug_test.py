@@ -34,7 +34,7 @@ class GroupDetail(BaseModel):
     F_ID: int
     F_ZBMC: str
     F_ZBLX: str
-    F_SORT: int
+    F_SORT: Optional[int] = None
     F_FKSSZ: int
     F_ND: List[Union[int, float, str]] = Field(default_factory=list, description="浓度数组，支持整数、浮点数或字符串")
     F_YY: List[DrugUsageDetail] = Field(default_factory=list, description="用药信息列表")
@@ -60,12 +60,12 @@ class WellDetail(WellItem):
 class TestPlanCreateIn(BaseModel):
     """创建实验计划"""
     F_GDID: int = Field(..., description="关联工单ID")
-    F_SYMC: str = Field(..., description="实验名称")
+    F_SYMC: Optional[str] = Field(None, description="实验名称")
     F_SYBH: Optional[str] = Field(None, description="实验编号（系统自动生成）")
     F_SYKSRQ: Optional[str] = Field(None, description="试验开始日期")
     F_SYR: Optional[str] = Field(None, description="实验人")
     F_SYJHYMD: Optional[str] = Field(None, description="实验计划与目的")
-    F_LQGMD: Optional[str] = Field(None, description="类器官密度")
+    F_XBSL: Optional[str] = Field(None, description="细胞数量")
     F_JZJND: Optional[str] = Field(None, description="基质胶浓度")
     F_JZJTJ: Optional[str] = Field(None, description="基质胶体积")
     F_FJ: Optional[int] = Field(None, description="附件ID")
@@ -79,15 +79,26 @@ class TestPlanCreateIn(BaseModel):
 
 class TestPlanCreateOut(BaseModel):
     """创建实验计划返回"""
-    F_ID: int
-    F_GDID: int
-    F_SYMC: str
+    F_ID: Optional[int] = None
+    F_GDID: Optional[int] = None
+    F_SYMC: Optional[str] = None
     F_SYBH: str = Field(..., description="实验编号")
     auto_outbound_count: int = Field(default=0, description="自动生成的出库单数量")
     auto_outbound_codes: List[str] = Field(default_factory=list, description="自动生成的出库单号列表")
 
 
 # ==================== 实验计划 - 更新 ====================
+class GroupItemUpdate(BaseModel):
+    """更新时的组别信息（有F_ID=更新已有组别，无F_ID=新增组别）"""
+    F_ID: Optional[int] = Field(None, description="组别ID：有则更新，无则新增")
+    F_ZBMC: str = Field(..., description="组别名称")
+    F_ZBLX: str = Field(..., description="组别类型")
+    F_SORT: Optional[int] = Field(None, description="排序")
+    F_FKSSZ: int = Field(..., description="复孔数设置")
+    F_ND: List[Union[int, float, str]] = Field(..., description="浓度数组")
+    F_YY: List[DrugUsageItem] = Field(default_factory=list, description="用药信息列表")
+
+
 class TestPlanUpdateIn(BaseModel):
     """更新实验计划"""
     F_ID: int = Field(..., description="实验计划ID")
@@ -95,7 +106,7 @@ class TestPlanUpdateIn(BaseModel):
     F_SYKSRQ: Optional[str] = Field(None, description="试验开始日期")
     F_SYR: Optional[str] = Field(None, description="实验人")
     F_SYJHYMD: Optional[str] = Field(None, description="实验计划与目的")
-    F_LQGMD: Optional[str] = Field(None, description="类器官密度")
+    F_XBSL: Optional[str] = Field(None, description="细胞数量")
     F_JZJND: Optional[str] = Field(None, description="基质胶浓度")
     F_JZJTJ: Optional[str] = Field(None, description="基质胶体积")
     F_FJ: Optional[int] = Field(None, description="附件ID")
@@ -103,8 +114,15 @@ class TestPlanUpdateIn(BaseModel):
     F_KBBH: Optional[str] = Field(None, description="孔板编号")
     F_ZT: Optional[str] = Field(None, description="状态")
     F_BZ: Optional[str] = Field(None, description="备注")
-    
-    ZBXX: Optional[List[GroupItem]] = Field(None, description="实验组别列表（更新则覆盖）")
+
+    ZBXX: Optional[List[GroupItemUpdate]] = Field(
+        None,
+        description="组别列表：有F_ID=更新，无F_ID=新增"
+    )
+    ZBXX_DEL_IDS: Optional[List[int]] = Field(
+        None,
+        description="要删除的组别ID列表，如 [2, 3]"
+    )
     KWXX: Optional[List[WellItem]] = Field(None, description="孔位信息列表（更新则覆盖）")
 
 
@@ -124,13 +142,13 @@ class WorkOrderInfo(BaseModel):
 class TestPlanDetailOut(BaseModel):
     """实验计划详情"""
     F_ID: int
-    F_GDID: int
+    F_GDID: Optional[int] = None
     F_SYBH: Optional[str] = Field(None, description="实验编号")
-    F_SYMC: str
+    F_SYMC: Optional[str] = Field(None, description="实验名称")
     F_SYKSRQ: Optional[str] = None
     F_SYR: Optional[str] = None
     F_SYJHYMD: Optional[str] = None
-    F_LQGMD: Optional[str] = None
+    F_XBSL: Optional[str] = None
     F_JZJND: Optional[str] = None
     F_JZJTJ: Optional[str] = None
     F_FJ: Optional[str] = None
@@ -165,9 +183,9 @@ class TestPlanListQuery(BaseModel):
 class TestPlanListItem(BaseModel):
     """实验计划列表项"""
     F_ID: int
-    F_GDID: int
+    F_GDID: Optional[int] = None
     F_SYBH: Optional[str] = Field(None, description="实验编号")
-    F_SYMC: str
+    F_SYMC: Optional[str] = Field(None, description="实验名称")
     F_SYKSRQ: Optional[str] = None
     F_SYR: Optional[str] = None
     F_GROUP_COUNT: int = Field(default=0, description="组别数量")
@@ -185,6 +203,9 @@ class TestPlanListItem(BaseModel):
     F_YBLY: Optional[str] = Field(None, description="样本来源")
     F_SQR: Optional[str] = Field(None, description="培养人")
     F_PYSJ: Optional[str] = Field(None, description="开始培养日期")
+    
+    # PDF报告
+    F_BG_PDF: Optional[dict] = Field(None, description="药物试验报告PDF")
 
 
 class TestPlanListOut(BaseModel):

@@ -57,4 +57,3 @@ def stream(payload: FileStreamIn):
         return FileResponse(path=str(abs_path), filename=filename)
     except Exception:
         return err("读取失败")
-

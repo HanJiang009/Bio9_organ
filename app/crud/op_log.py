@@ -32,7 +32,7 @@ def _load_permission_labels() -> Dict[str, Any]:
             base_dir = Path(__file__).resolve().parents[1]
         
         p = base_dir / "config" / "permission_labels.json"
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding='utf-8-sig'))
         return data if isinstance(data, dict) else {"labels": {}}
     except Exception:
         return {"labels": {}}
@@ -86,7 +86,8 @@ def insert_op_log(module: str, op_type: str, operator: Optional[str], status: st
         )
         conn.commit()
 
-def list_op_logs(q: OpLogQuery) -> Dict[str, Any]:
+def list_op_logs(q: OpLogQuery, user: Dict[str, Any] | None = None,
+                scope: str | None = None) -> Dict[str, Any]:
     adapter = get_adapter()
     where_clauses: List[str] = []
     params: list = []
@@ -124,6 +125,11 @@ def list_op_logs(q: OpLogQuery) -> Dict[str, Any]:
     if getattr(q, "F_CZSJ_END", None):
         where_clauses.append("F_CZSJ <= ?")
         params.append(q.F_CZSJ_END)
+
+    from app.core.data_scope import apply_owner_or_filter
+    apply_owner_or_filter(
+        where_clauses, params, scope=scope, user=user, columns=["F_CZR", "F_YSM"], match="name",
+    )
 
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 

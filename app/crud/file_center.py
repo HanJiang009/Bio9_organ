@@ -1,7 +1,22 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from app.db.factory import get_adapter
 from pathlib import Path
 from app.core.settings import settings
+
+
+def format_file_static_url(path: Any) -> Optional[str]:
+    """将 T_FILES.F_PATH 或上传相对路径转为静态访问地址（不含 uploads/ 前缀）。"""
+    if path is None:
+        return None
+    p = str(path).strip().replace("\\", "/")
+    if not p:
+        return None
+    lower = p.lower()
+    if "uploads/" in lower:
+        idx = lower.rfind("uploads/")
+        p = p[idx + len("uploads/") :]
+    p = p.lstrip("/")
+    return p or None
 
 
 def get_file_by_id(file_id: int) -> Optional[Dict[str, Any]]:

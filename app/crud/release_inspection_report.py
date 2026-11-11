@@ -15,6 +15,35 @@ from datetime import datetime
 from app.crud.culture_detail_report import assemble_culture_detail_report
 from app.crud.qc_record import get_qc_record_by_gdid
 from app.crud.file_center import get_file_url
+import json
+
+
+def _resolve_first_file_url(file_ids_raw: Any) -> str:
+    """将文件 ID（单值 / JSON 字符串 / 列表）解析为首个可访问 URL。"""
+    if not file_ids_raw:
+        return ""
+    if isinstance(file_ids_raw, str):
+        s = file_ids_raw.strip()
+        if s.startswith("[") or s.startswith("{"):
+            try:
+                file_ids_raw = json.loads(s)
+            except Exception:
+                return get_file_url(s)
+        else:
+            return get_file_url(s)
+    if isinstance(file_ids_raw, int):
+        return get_file_url(file_ids_raw)
+    if isinstance(file_ids_raw, list):
+        for item in file_ids_raw:
+            if isinstance(item, int):
+                url = get_file_url(item)
+                if url:
+                    return url
+            elif isinstance(item, dict):
+                path = item.get("url") or item.get("path") or item.get("F_PATH")
+                if path:
+                    return str(path) if str(path).startswith("/") else f"/{path}"
+    return ""
 
 
 def format_zkjl_data(zkjl_raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -53,13 +82,9 @@ def format_zkjl_data(zkjl_raw: Dict[str, Any]) -> Dict[str, Any]:
         if url_field in zkjl_raw and zkjl_raw[url_field]:
             zkjl_formatted[url_field] = zkjl_raw[url_field]
         else:
-            # 如果没有URL字段，从文件ID转换
+            # 如果没有URL字段，从文件ID转换（支持单 ID 或 ID 列表）
             file_id = zkjl_raw.get(img_field)
-            if file_id:
-                url = get_file_url(file_id)
-                zkjl_formatted[url_field] = url if url else ""
-            else:
-                zkjl_formatted[url_field] = ""
+            zkjl_formatted[url_field] = _resolve_first_file_url(file_id)
     
     return zkjl_formatted
 

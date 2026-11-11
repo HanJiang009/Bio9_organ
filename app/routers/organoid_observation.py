@@ -4,7 +4,7 @@ from app.schemas.common import ApiResponse
 from app.core.response import ok, err
 from app.core.auth import require_roles, get_current_user_optional
 from app.core.storage import build_upload_path
-from app.crud.file_center import insert_file_record
+from app.crud.file_center import insert_file_record, format_file_static_url
 from app.crud import organoid_observation as crud
 from app.crud import organoid_culture_tissue as crud_order
 from app.crud import organoid_culture_detail as crud_detail
@@ -19,13 +19,48 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/organoid-observation", tags=["organoid_observation"])
 
 
-@router.post("/create", response_model=ApiResponse[dict], response_model_exclude_none=True,
+def _file_ref_attachment(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """文件中心引用。已有 F_TPBM 原样带回，供保存时保持原号。"""
+    if not isinstance(it, dict):
+        return None
+    try:
+        att: Dict[str, Any] = {"F_BS": it.get("F_BS"), "F_WJ_ID": int(it.get("F_WJ_ID"))}
+    except (TypeError, ValueError):
+        return None
+    if it.get("F_URL"):
+        att["F_URL"] = format_file_static_url(it.get("F_URL"))
+    if it.get("F_NAME"):
+        att["F_NAME"] = it.get("F_NAME")
+    code = it.get("F_TPBM")
+    if code is not None and str(code).strip():
+        att["F_TPBM"] = str(code).strip()
+    return att
+
+
+def _chart_numeric_value(v: Any) -> Optional[float]:
+    """生长曲线：F_XBSL 为字符串时尝试解析为数值，无法解析则跳过。"""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return float(int(v))
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        return float(s) if "." in s else float(int(s))
+    except (TypeError, ValueError):
+        return None
+
+
+@router.post("/create", response_model=ApiResponse[dict], response_model_exclude_none=False,
              dependencies=[Depends(require_roles(["organoid_culture_tissue"]))])
 async def create_observation(
     GCXX: str = Form(..., description="JSON：观察记录主体字段（不含附件）"),
     F_FJ: List[UploadFile] | None = File(None),
     F_FJ_BS: str | None = Form(default=None, description="JSON数组，与F_FJ文件顺序一一对应，例如 [10,20]") ,
-    F_FJ_IDS: str | None = Form(default=None, description="JSON数组：[{\"F_BS\": 10, \"F_WJ_ID\": 123}]"),
+    F_FJ_IDS: str | None = Form(default=None, description="JSON数组：[{\"F_BS\": 10, \"F_WJ_ID\": 123, \"F_TPBM\": \"已有编码\"}]"),
     current_user: dict = Depends(get_current_user_optional),
 ):
     # 解析主体 JSON
@@ -66,7 +101,12 @@ async def create_observation(
             dst_path.write_bytes(content)
             fid = insert_file_record(rel, f.filename)
             if fid is not None:
-                attachments.append({"F_BS": bs_list[idx], "F_WJ_ID": int(fid)})
+                attachments.append({
+                    "F_BS": bs_list[idx],
+                    "F_WJ_ID": int(fid),
+                    "F_URL": format_file_static_url(rel),
+                    "F_NAME": f.filename,
+                })
 
     # 路径B：来自文件中心的ID引用
     if F_FJ_IDS:
@@ -75,14 +115,9 @@ async def create_observation(
             if not isinstance(parsed_ids, list):
                 return err("F_FJ_IDS 应为JSON数组")
             for it in parsed_ids:
-                if not isinstance(it, dict):
-                    continue
-                bs = it.get("F_BS")
-                fid = it.get("F_WJ_ID")
-                try:
-                    attachments.append({"F_BS": bs, "F_WJ_ID": int(fid)})
-                except Exception:
-                    pass
+                att = _file_ref_attachment(it)
+                if att:
+                    attachments.append(att)
         except Exception:
             return err("F_FJ_IDS 解析失败")
 
@@ -97,14 +132,14 @@ async def create_observation(
     return ok(res, "创建成功")
 
 
-@router.post("/update", response_model=ApiResponse[dict], response_model_exclude_none=True,
+@router.post("/update", response_model=ApiResponse[dict], response_model_exclude_none=False,
              dependencies=[Depends(require_roles(["organoid_culture_tissue"]))])
 async def update_observation(
     F_ID: int = Form(..., description="观察记录ID"),
     GCXX: str = Form(..., description="JSON：观察记录主体字段（不含附件）"),
     F_FJ: List[UploadFile] | None = File(None),
     F_FJ_BS: str | None = Form(default=None, description="JSON数组，与F_FJ文件顺序一一对应，例如 [10,20]"),
-    F_FJ_IDS: str | None = Form(default=None, description="JSON数组：[{\"F_BS\": 10, \"F_WJ_ID\": 123}]"),
+    F_FJ_IDS: str | None = Form(default=None, description="JSON数组：[{\"F_BS\": 10, \"F_WJ_ID\": 123, \"F_TPBM\": \"已有编码\"}]"),
     current_user: dict = Depends(get_current_user_optional),
 ):
     """
@@ -179,7 +214,12 @@ async def update_observation(
                 dst_path.write_bytes(content)
                 fid = insert_file_record(rel, f.filename)
                 if fid is not None:
-                    attachments.append({"F_BS": bs_list[idx], "F_WJ_ID": int(fid)})
+                    attachments.append({
+                        "F_BS": bs_list[idx],
+                        "F_WJ_ID": int(fid),
+                        "F_URL": format_file_static_url(rel),
+                        "F_NAME": f.filename,
+                    })
         
         # 路径B：来自文件中心的ID引用
         if F_FJ_IDS:
@@ -188,14 +228,9 @@ async def update_observation(
                 if not isinstance(parsed_ids, list):
                     return err("F_FJ_IDS 应为JSON数组")
                 for it in parsed_ids:
-                    if not isinstance(it, dict):
-                        continue
-                    bs = it.get("F_BS")
-                    fid = it.get("F_WJ_ID")
-                    try:
-                        attachments.append({"F_BS": bs, "F_WJ_ID": int(fid)})
-                    except Exception:
-                        pass
+                    att = _file_ref_attachment(it)
+                    if att:
+                        attachments.append(att)
             except Exception:
                 return err("F_FJ_IDS 解析失败")
     
@@ -234,8 +269,12 @@ class DetailByGdIn(BaseModel):
 
 @router.post("/detail-by-gdid", response_model=ApiResponse[dict], response_model_exclude_none=True,
              dependencies=[Depends(require_roles(["organoid_culture_tissue"]))])
-def detail_by_gdid(payload: DetailByGdIn):
+def detail_by_gdid(payload: DetailByGdIn, current_user: dict = Depends(get_current_user_optional)):
     gdid = int(payload.F_GDID)
+    from app.core.data_scope import deny_pygd_access
+    denied = deny_pygd_access(current_user, gdid, module="organoid_culture_tissue")
+    if denied:
+        return denied
 
     # 工单详情（按需要可扩展为单独CRUD，这里复用已存在查询能力）
     order = crud_order.get_culture_order_detail(gdid) if hasattr(crud_order, "get_culture_order_detail") else None
@@ -282,7 +321,16 @@ def detail_by_gdid(payload: DetailByGdIn):
             fid = att.get("F_WJ_ID")
             rec = files_map.get(int(fid)) if fid is not None else None
             url = _clean_path(rec.get("F_PATH")) if rec and rec.get("F_PATH") else None
-            fj_new.append({"F_BS": att.get("F_BS"), "F_WJ_ID": fid, "F_URL": url})
+            code = att.get("F_TPBM")
+            item = {
+                "F_BS": att.get("F_BS"),
+                "F_WJ_ID": fid,
+                "F_URL": url,
+                "F_TPBM": "" if code is None else str(code),
+            }
+            if att.get("F_NAME"):
+                item["F_NAME"] = att.get("F_NAME")
+            fj_new.append(item)
         it["F_FJ"] = fj_new
 
     # 生长曲线
@@ -293,32 +341,16 @@ def detail_by_gdid(payload: DetailByGdIn):
         if day is not None:
             if it.get("F_PJZJ") is not None:
                 diameter_series.append({"day": int(day), "value": it.get("F_PJZJ")})
-            if it.get("F_XBSL") is not None:
-                cellcount_series.append({"day": int(day), "value": it.get("F_XBSL")})
+            xbsl_val = _chart_numeric_value(it.get("F_XBSL"))
+            if xbsl_val is not None:
+                cellcount_series.append({"day": int(day), "value": xbsl_val})
     diameter_series.sort(key=lambda x: x["day"])
     cellcount_series.sort(key=lambda x: x["day"])
 
     # 回收记录
+    # ✅ get_recycle_by_gdid 已经将 F_FJ 从 ID 数组转换为详情数组（包含 id, path, name）
+    # 格式：[{"id": 2555, "path": "2026/01/28/xxx.jpg", "name": "原始文件名.jpg"}]
     recycle = crud_recycle.get_recycle_by_gdid(gdid)
-    if recycle:
-        # 附件为文件ID数组，转URL
-        r_ids: List[int] = []
-        for vid in (recycle.get("F_FJ") or []):
-            try:
-                r_ids.append(int(vid))
-            except Exception:
-                pass
-        r_map: Dict[int, Dict[str, Any]] = {}
-        if r_ids:
-            recs2 = get_files_by_ids(sorted(list({i for i in r_ids if i is not None})))
-            for r in recs2:
-                r_map[int(r["F_ID"])] = r
-        r_urls = []
-        for vid in r_ids:
-            rec = r_map.get(int(vid)) if vid is not None else None
-            url = _clean_path(rec.get("F_PATH")) if rec and rec.get("F_PATH") else None
-            r_urls.append({"F_WJ_ID": vid, "F_URL": url})
-        recycle["F_FJ"] = r_urls
 
     return ok({
         "order": order or {},

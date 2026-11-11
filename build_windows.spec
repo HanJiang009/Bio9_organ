@@ -97,6 +97,8 @@ hidden_imports = [
     # 数据库
     'pyodbc',
     'dmPython',
+    'pymysql',
+    'pymysql.cursors',
     
     # 文档处理
     'docx',
