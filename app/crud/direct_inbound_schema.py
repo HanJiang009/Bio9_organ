@@ -116,7 +116,7 @@ def _ensure_tube_columns(adapter, cur, kind: str) -> None:
         "sqlserver": "NVARCHAR(300) NULL",
         "dameng": "VARCHAR(300)",
     }[kind]
-    for column in ("F_RQ_ID", "F_RQC", "F_RQJ", "F_RQCT", "F_RQH", "F_LOCK_CKD_ID"):
+    for column in ("F_RQ_ID", "F_RQC", "F_RQJ", "F_RQCT", "F_RQH", "F_RQHX", "F_RQHL", "F_LOCK_CKD_ID"):
         _add_column(adapter, cur, kind, "T_YBFZ", column, int_type)
     _add_column(adapter, cur, kind, "T_YBFZ", "F_CCWZ", text_type)
 
@@ -158,8 +158,8 @@ def assert_slot_count(layers: int, racks: int, drawers: int, boxes: int) -> int:
     return total
 
 
-def format_ccwz(code: str, layer: int, rack: int, drawer: int, box: int) -> str:
-    return f"{code} / {layer}层 / {rack}架 / {drawer}抽屉 / {box}盒"
+def format_ccwz(code: str, layer: int, rack: int, drawer: int, box: int, row: int, col: int) -> str:
+    return f"{code} / {layer}层 / {rack}架 / {drawer}抽屉 / {box}盒 / {row}行{col}列"
 
 
 def lock_id(value) -> int | None:

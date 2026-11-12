@@ -28,9 +28,9 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
     seen_slots = set()
     tube_ids: List[int] = []
     for item in items:
-        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"])
+        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"])
         if slot in seen_slots:
-            raise ValueError(f"盒位重复: {_slot_text(slot)}")
+            raise ValueError(f"管位重复: {_slot_text(slot)}")
         seen_slots.add(slot)
         spec = layer_map.get(item["F_C"])
         if (
@@ -38,8 +38,10 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
             or item["F_J"] > int(spec["F_JS"])
             or item["F_CT"] > int(spec["F_CTS"])
             or item["F_H"] > int(spec["F_HXS"])
+            or item["F_HX"] > int(spec.get("F_HS") or 1)
+            or item["F_LX"] > int(spec.get("F_LS") or 1)
         ):
-            raise ValueError(f"盒位超出容器规格: {_slot_text(slot)}")
+            raise ValueError(f"管位超出容器规格: {_slot_text(slot)}")
         tube_ids.append(item["F_YBFZ_ID"])
 
     adapter = get_adapter()
@@ -52,9 +54,9 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
 
     occupied = occupied_keys(adapter, rq_id)
     for item in items:
-        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"])
+        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"])
         if slot in occupied:
-            raise ValueError(f"盒位已被占用: {_slot_text(slot)}")
+            raise ValueError(f"管位已被占用: {_slot_text(slot)}")
 
     need_audit = inbound_needs_audit()
     tube_status = AUDIT_PENDING if need_audit else "运送中"
@@ -67,7 +69,7 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
 
     placed = []
     for item in items:
-        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"])
+        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"])
         tube = tubes[item["F_YBFZ_ID"]]
         placed.append({
             **item,
@@ -83,18 +85,26 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
                 """
                 SELECT F_ID FROM T_YBFZ
                 WHERE F_RQ_ID = ? AND F_RQC = ? AND F_RQJ = ? AND F_RQCT = ? AND F_RQH = ?
+                  AND COALESCE(F_RQHX, 1) = ? AND COALESCE(F_RQHL, 1) = ?
                   AND (F_KCZT IS NULL OR F_KCZT <> ?)
                 """,
-                (rq_id, item["F_C"], item["F_J"], item["F_CT"], item["F_H"], "已出库"),
+                (
+                    rq_id, item["F_C"], item["F_J"], item["F_CT"], item["F_H"],
+                    item["F_HX"], item["F_LX"], "已出库",
+                ),
             )
             found = cur.fetchone()
+            well = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"])
             if found and int(found[0]) not in tube_ids:
-                raise ValueError(f"盒位已被占用: {_slot_text((item['F_C'], item['F_J'], item['F_CT'], item['F_H']))}")
+                raise ValueError(f"管位已被占用: {_slot_text(well)}")
             values = [
                 rq_id, item["F_C"], item["F_J"], item["F_CT"], item["F_H"],
-                item["F_CCWZ"], tube_status,
+                item["F_HX"], item["F_LX"], item["F_CCWZ"], tube_status,
             ]
-            sets = "F_RQ_ID = ?, F_RQC = ?, F_RQJ = ?, F_RQCT = ?, F_RQH = ?, F_CCWZ = ?, F_YSZT = ?"
+            sets = (
+                "F_RQ_ID = ?, F_RQC = ?, F_RQJ = ?, F_RQCT = ?, F_RQH = ?, "
+                "F_RQHX = ?, F_RQHL = ?, F_CCWZ = ?, F_YSZT = ?"
+            )
             if destination:
                 sets += ", F_YSMDD = ?"
                 values.append(destination)
@@ -178,11 +188,13 @@ def _items(raw: Any) -> List[Dict[str, int]]:
                 "F_J": int(raw_item.get("F_J")),
                 "F_CT": int(raw_item.get("F_CT")),
                 "F_H": int(raw_item.get("F_H")),
+                "F_HX": int(raw_item.get("F_HX")),
+                "F_LX": int(raw_item.get("F_LX")),
             }
         except (TypeError, ValueError):
-            raise ValueError(f"第{index}条样本的分装ID和层架抽屉盒必须是整数")
-        if min(slot["F_C"], slot["F_J"], slot["F_CT"], slot["F_H"]) < 1:
-            raise ValueError(f"第{index}条样本的层架抽屉盒须从 1 开始")
+            raise ValueError(f"第{index}条样本的分装ID、层架抽屉盒和盒内行列必须是整数")
+        if min(slot["F_C"], slot["F_J"], slot["F_CT"], slot["F_H"], slot["F_HX"], slot["F_LX"]) < 1:
+            raise ValueError(f"第{index}条样本的层架抽屉盒和盒内行列须从 1 开始")
         if tube_id in seen_ids:
             raise ValueError(f"分装记录重复: {tube_id}")
         seen_ids.add(tube_id)
@@ -217,14 +229,14 @@ def _assert_tube_free(tube: Dict[str, Any]) -> None:
 
 
 def _slot_text(slot) -> str:
-    layer, rack, drawer, box = slot
-    return f"{layer}层{rack}架{drawer}抽屉{box}盒"
+    layer, rack, drawer, box, row, col = slot
+    return f"{layer}层{rack}架{drawer}抽屉{box}盒{row}行{col}列"
 
 
 def _box_text(items: List[Dict[str, Any]]) -> str:
     seen = []
     for item in items:
-        text = _slot_text((item["F_C"], item["F_J"], item["F_CT"], item["F_H"]))
+        text = _slot_text((item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"]))
         if text not in seen:
             seen.append(text)
     return ",".join(seen)

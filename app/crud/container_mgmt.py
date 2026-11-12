@@ -113,24 +113,41 @@ def _code_taken(adapter, code: str, exclude_id: Optional[int] = None) -> bool:
     return bool(rows)
 
 
-def occupied_keys(adapter, rq_id: int) -> Set[Tuple[int, int, int, int]]:
-    """仍占用盒位的管子。已出库的管子不再占位。"""
+def _well(value: Any) -> int:
+    if value is None or str(value).strip() == "":
+        return 1
+    return int(value)
+
+
+def occupied_tubes(adapter, rq_id: int) -> Dict[Tuple[int, int, int, int, int, int], Dict[str, Any]]:
+    """仍占用管位的管子。已出库的不再占位。同一管位只保留一条。"""
     rows, cols = adapter.fetch_all(
         """
-        SELECT F_RQC, F_RQJ, F_RQCT, F_RQH
+        SELECT F_ID, F_SGBH, F_RQC, F_RQJ, F_RQCT, F_RQH, F_RQHX, F_RQHL
         FROM T_YBFZ
         WHERE F_RQ_ID = ? AND (F_KCZT IS NULL OR F_KCZT <> ?)
         """,
         [rq_id, "已出库"],
     )
-    keys: Set[Tuple[int, int, int, int]] = set()
+    found: Dict[Tuple[int, int, int, int, int, int], Dict[str, Any]] = {}
     for row in rows:
         item = _record(cols, row)
-        key = (item.get("F_RQC"), item.get("F_RQJ"), item.get("F_RQCT"), item.get("F_RQH"))
-        if any(part is None or str(part).strip() == "" for part in key):
+        place = (item.get("F_RQC"), item.get("F_RQJ"), item.get("F_RQCT"), item.get("F_RQH"))
+        if any(part is None or str(part).strip() == "" for part in place):
             continue
-        keys.add(tuple(int(part) for part in key))
-    return keys
+        key = tuple(int(part) for part in place) + (_well(item.get("F_RQHX")), _well(item.get("F_RQHL")))
+        found[key] = {
+            "F_YBFZ_ID": int(item["F_ID"]),
+            "F_SGBH": str(item.get("F_SGBH") or ""),
+            "F_HX": key[4],
+            "F_LX": key[5],
+        }
+    return found
+
+
+def occupied_keys(adapter, rq_id: int) -> Set[Tuple[int, int, int, int, int, int]]:
+    """仍占用管位的管子。已出库的不再占位。"""
+    return set(occupied_tubes(adapter, rq_id))
 
 
 def _usage_map(adapter, rq_ids: List[int]) -> Dict[int, int]:
@@ -139,23 +156,20 @@ def _usage_map(adapter, rq_ids: List[int]) -> Dict[int, int]:
     placeholders = ",".join(["?"] * len(rq_ids))
     rows, cols = adapter.fetch_all(
         f"""
-        SELECT F_RQ_ID, F_RQC, F_RQJ, F_RQCT, F_RQH
+        SELECT F_RQ_ID
         FROM T_YBFZ
         WHERE F_RQ_ID IN ({placeholders}) AND (F_KCZT IS NULL OR F_KCZT <> ?)
         """,
         list(rq_ids) + ["已出库"],
     )
-    grouped: Dict[int, Set[Tuple[int, int, int, int]]] = {}
+    grouped: Dict[int, int] = {}
     for row in rows:
         item = _record(cols, row)
         rq_id = item.get("F_RQ_ID")
         if rq_id is None:
             continue
-        key = (item.get("F_RQC"), item.get("F_RQJ"), item.get("F_RQCT"), item.get("F_RQH"))
-        if any(part is None or str(part).strip() == "" for part in key):
-            continue
-        grouped.setdefault(int(rq_id), set()).add(tuple(int(part) for part in key))
-    return {rq_id: len(keys) for rq_id, keys in grouped.items()}
+        grouped[int(rq_id)] = grouped.get(int(rq_id), 0) + 1
+    return grouped
 
 
 def _layer_view(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -190,7 +204,8 @@ def _summary(layers: List[Dict[str, Any]]) -> str:
 
 def _present(row: Dict[str, Any], used: int, layers: List[Dict[str, Any]]) -> Dict[str, Any]:
     shown = [_layer_view(item) for item in layers]
-    total = sum(item["F_HXW"] for item in shown)
+    total_boxes = sum(item["F_HXW"] for item in shown)
+    total_wells = sum(item["F_RL"] for item in shown)
     return {
         "F_ID": int(row["F_ID"]),
         "F_RQBH": row.get("F_RQBH"),
@@ -201,8 +216,9 @@ def _present(row: Dict[str, Any], used: int, layers: List[Dict[str, Any]]) -> Di
         "F_GG": _summary(shown),
         "LAYERS": shown,
         "F_YZY": used,
-        "F_ZHW": total,
-        "F_YSY": f"{used}/{total}",
+        "F_ZHW": total_boxes,
+        "F_ZGW": total_wells,
+        "F_YSY": f"{used}/{total_wells}",
         "F_ZT": row.get("F_ZT"),
         "F_CJSJ": row.get("F_CJSJ"),
         "F_BZ": row.get("F_BZ"),
@@ -498,7 +514,7 @@ def container_tree(payload: Dict[str, Any]) -> Dict[str, Any]:
     row = _get_row(adapter, rq_id)
     layer_rows = load_layers(adapter, rq_id, row)
     layer_map = {int(item["F_C"]): item for item in layer_rows}
-    used = occupied_keys(adapter, rq_id)
+    tubes = occupied_tubes(adapter, rq_id)
     header = {
         "F_ID": rq_id,
         "F_RQBH": row.get("F_RQBH"),
@@ -524,29 +540,37 @@ def container_tree(payload: Dict[str, Any]) -> Dict[str, Any]:
             "F_C": layer_no,
             "F_J": rack_no,
             "F_CT": drawer_no,
-            "boxes": _boxes(used, layer_no, rack_no, drawer_no, int(spec["F_HXS"])),
+            "F_HS": int(spec.get("F_HS") or 1),
+            "F_LS": int(spec.get("F_LS") or 1),
+            "boxes": _boxes(tubes, layer_no, rack_no, drawer_no, int(spec["F_HXS"])),
         })
         return header
-    header["layers"] = [_tree_layer(item, used) for item in layer_rows]
+    header["layers"] = [_tree_layer(item, tubes) for item in layer_rows]
     return header
 
 
-def _tree_layer(item: Dict[str, Any], used: Set[Tuple[int, int, int, int]]) -> Dict[str, Any]:
+def _tree_layer(
+    item: Dict[str, Any],
+    tubes: Dict[Tuple[int, int, int, int, int, int], Dict[str, Any]],
+) -> Dict[str, Any]:
     layer = int(item["F_C"])
+    rows = int(item.get("F_HS") or 1)
+    cols = int(item.get("F_LS") or 1)
     racks = []
     for rack in range(1, int(item["F_JS"]) + 1):
         drawers = []
         occupied = 0
-        total = 0
+        box_count = 0
         for drawer in range(1, int(item["F_CTS"]) + 1):
-            boxes = _boxes(used, layer, rack, drawer, int(item["F_HXS"]))
+            boxes = _boxes(tubes, layer, rack, drawer, int(item["F_HXS"]))
             drawers.append({"F_CT": drawer, "boxes": boxes})
-            total += len(boxes)
-            occupied += sum(1 for box in boxes if box["F_ZY"])
+            box_count += len(boxes)
+            occupied += sum(len(box["tubes"]) for box in boxes)
+        capacity = box_count * rows * cols
         racks.append({
             "F_J": rack,
             "F_GS": occupied,
-            "F_ZYL": round(occupied * 100 / total, 1) if total else 0,
+            "F_ZYL": round(occupied * 100 / capacity, 1) if capacity else 0,
             "drawers": drawers,
         })
     return {
@@ -558,11 +582,28 @@ def _tree_layer(item: Dict[str, Any], used: Set[Tuple[int, int, int, int]]) -> D
     }
 
 
-def _boxes(used: Set[Tuple[int, int, int, int]], layer: int, rack: int, drawer: int, boxes: int) -> List[Dict[str, Any]]:
-    return [
-        {"F_H": box, "F_ZY": (layer, rack, drawer, box) in used}
-        for box in range(1, boxes + 1)
-    ]
+def _boxes(
+    tubes: Dict[Tuple[int, int, int, int, int, int], Dict[str, Any]],
+    layer: int,
+    rack: int,
+    drawer: int,
+    boxes: int,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for key, tube in tubes.items():
+        if key[0] != layer or key[1] != rack or key[2] != drawer:
+            continue
+        grouped.setdefault(key[3], []).append({
+            "F_HX": tube["F_HX"],
+            "F_LX": tube["F_LX"],
+            "F_SGBH": tube["F_SGBH"],
+            "F_YBFZ_ID": tube["F_YBFZ_ID"],
+        })
+    result = []
+    for box in range(1, boxes + 1):
+        wells = sorted(grouped.get(box, []), key=lambda item: (item["F_HX"], item["F_LX"]))
+        result.append({"F_H": box, "F_ZY": bool(wells), "tubes": wells})
+    return result
 
 
 def load_enabled_container(rq_id: int) -> Dict[str, Any]:

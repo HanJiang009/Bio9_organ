@@ -327,7 +327,7 @@ def _review_inbound(cur, transport_id: int, passed: bool) -> None:
         f"""
         UPDATE T_YBFZ
         SET F_RQ_ID = NULL, F_RQC = NULL, F_RQJ = NULL, F_RQCT = NULL, F_RQH = NULL,
-            F_CCWZ = NULL, F_YSZT = ?
+            F_RQHX = NULL, F_RQHL = NULL, F_CCWZ = NULL, F_YSZT = ?
         WHERE F_ID IN ({placeholders}) AND F_YSZT = ?
         """,
         tuple(["未运送"] + tube_ids + [AUDIT_PENDING]),

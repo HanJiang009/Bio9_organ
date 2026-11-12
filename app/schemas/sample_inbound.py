@@ -8,6 +8,8 @@ class SampleInboundItem(BaseModel):
     F_J: int = Field(description="架，从 1 开始")
     F_CT: int = Field(description="抽屉，从 1 开始")
     F_H: int = Field(description="盒，从 1 开始")
+    F_HX: int = Field(description="盒内行，从 1 开始，不超过该层盒规格行数")
+    F_LX: int = Field(description="盒内列，从 1 开始，不超过该层盒规格列数")
 
 
 class SampleInboundStore(BaseModel):

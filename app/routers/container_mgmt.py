@@ -23,7 +23,7 @@ router = APIRouter(prefix="/container-mgmt", tags=["container_mgmt"])
 @router.post("/list", response_model=ApiResponse[ContainerListResponse], response_model_exclude_none=True,
              dependencies=_auth)
 def list_containers(payload: ContainerListQuery):
-    """容器列表。F_GG 为层×架×抽屉×盒，F_YSY 为已占用盒位/总盒位。有占用时 F_KBJ、F_KSC 为 false。"""
+    """容器列表。F_GG 为层×架×抽屉×盒，F_YSY 为已存放管数/总管位。有管子占用时 F_KBJ、F_KSC 为 false。"""
     try:
         data = crud.list_containers(payload.model_dump())
         return ok(data, f"查询成功，共 {data.get('total', 0)} 条")
@@ -60,7 +60,7 @@ def detail(payload: ContainerId):
 @router.post("/tree", response_model=ApiResponse[dict], response_model_exclude_none=True,
              dependencies=_read)
 def tree(payload: ContainerTreeQuery):
-    """不传层架抽屉时返回整棵树。传 F_C、F_J、F_CT 后只返回该抽屉下的盒位，F_ZY 表示已占用。"""
+    """不传层架抽屉时返回整棵树。传 F_C、F_J、F_CT 后只返回该抽屉的盒子，每个盒子的 tubes 是已放的管子。"""
     try:
         return ok(crud.container_tree(payload.model_dump()), "查询成功")
     except ValueError as exc:
