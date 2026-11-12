@@ -579,6 +579,7 @@ _BACKFILL_MODULE_NODES = (
     {"id": "sample_inbound", "label": "样本入库", "hasPermission": False, "shortcut": False},
     {"id": "container_mgmt", "label": "容器管理", "hasPermission": False, "shortcut": False},
     {"id": "stock_audit", "label": "出入库审核", "hasPermission": False, "shortcut": False},
+    {"id": "field_config", "label": "字段配置", "hasPermission": False, "shortcut": False},
 )
 
 

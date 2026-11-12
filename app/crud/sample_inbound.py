@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from app.db.factory import get_adapter
-from app.crud.container_mgmt import load_enabled_container, occupied_keys
+from app.crud.container_mgmt import load_enabled_container, load_layers, occupied_keys
 from app.crud.direct_inbound_schema import ensure_schema, format_ccwz, lock_id
 from app.crud.op_log import insert_op_log
 from app.crud.sample_linkage import _parse_datetime, _resolve_operator
@@ -19,10 +19,10 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
     rq_id = int(rq_id)
     items = _items(payload.get("ITEMS") or payload.get("items"))
     container = load_enabled_container(rq_id)
-    layers = int(container.get("F_CS") or 0)
-    racks = int(container.get("F_JS") or 0)
-    drawers = int(container.get("F_CTS") or 0)
-    boxes = int(container.get("F_HXS") or 0)
+    layer_map = {
+        int(item["F_C"]): item
+        for item in load_layers(get_adapter(), rq_id, container)
+    }
     code = str(container.get("F_RQBH") or "")
 
     seen_slots = set()
@@ -32,7 +32,13 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
         if slot in seen_slots:
             raise ValueError(f"盒位重复: {_slot_text(slot)}")
         seen_slots.add(slot)
-        if item["F_C"] > layers or item["F_J"] > racks or item["F_CT"] > drawers or item["F_H"] > boxes:
+        spec = layer_map.get(item["F_C"])
+        if (
+            not spec
+            or item["F_J"] > int(spec["F_JS"])
+            or item["F_CT"] > int(spec["F_CTS"])
+            or item["F_H"] > int(spec["F_HXS"])
+        ):
             raise ValueError(f"盒位超出容器规格: {_slot_text(slot)}")
         tube_ids.append(item["F_YBFZ_ID"])
 

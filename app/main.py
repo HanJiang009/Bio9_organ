@@ -59,6 +59,7 @@ from .routers.outbound_mgmt import router as outbound_mgmt_router
 from .routers.container_mgmt import router as container_mgmt_router
 from .routers.sample_inbound import router as sample_inbound_router
 from .routers.stock_audit import router as stock_audit_router
+from .routers.field_config import router as field_config_router
 from .routers.unified_search import router as unified_search_router
 from .routers.preprocess import router as preprocess_router
 from .routers.op_log import router as op_log_router
@@ -238,6 +239,7 @@ app.include_router(outbound_mgmt_router)
 app.include_router(container_mgmt_router)
 app.include_router(sample_inbound_router)
 app.include_router(stock_audit_router)
+app.include_router(field_config_router)
 app.include_router(unified_search_router)
 app.include_router(drug_mgmt_router)
 app.include_router(drug_test_router)

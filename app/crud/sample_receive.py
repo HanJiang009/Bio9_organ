@@ -445,6 +445,9 @@ def save_all(jzxx: Dict[str, Any] | None, bbxx: Dict[str, Any] | None, ybzj: Dic
     """
     if not (jzxx or bbxx or ybzj):
         return
+    from app.crud.field_config import assert_page, scrub_hidden
+    scrub_hidden("sample_receive", jzxx, bbxx, ybzj)
+    assert_page("sample_receive", {"JZXX": jzxx or {}, "BBXX": bbxx or {}, "YBZJ": ybzj or {}})
     adapter = get_adapter()
     cleared_fields = _expand_cleared_field_aliases(
         _collect_empty_string_fields(jzxx)
@@ -473,6 +476,7 @@ def save_all(jzxx: Dict[str, Any] | None, bbxx: Dict[str, Any] | None, ybzj: Dic
             "F_XM","F_BRBH","F_ZYH","F_XB","F_NL","F_DH","F_SFZH","F_DZ",
             "F_BBLY","F_LCZD","F_ZQTYS","F_ZQTYSLB","F_MZH","F_CHH","F_BZTZ",
             "F_SJTMH",  # 送检条码号
+            "F_CSNY",  # 出生年月
             "F_XMMC",  # 项目名称（快照）
             "F_XMBH",  # 项目编号（快照）
         ]
@@ -668,6 +672,13 @@ def update_partial(zzid: str, jzxx: Dict[str, Any] | None, bbxx: Dict[str, Any] 
 
     返回 (False, False, u3)
     """
+    from app.crud.field_config import assert_page, scrub_hidden
+    scrub_hidden("sample_receive", jzxx, bbxx, ybzj)
+    assert_page(
+        "sample_receive",
+        {"JZXX": jzxx or {}, "BBXX": bbxx or {}, "YBZJ": ybzj or {}, "F_ZZID": zzid},
+        updating=True,
+    )
     adapter = get_adapter()
     # 规范空字符串时间字段：空串 -> None
     def _normalize_empty_time_fields(d: Dict[str, Any] | None) -> Dict[str, Any] | None:
@@ -732,6 +743,13 @@ def save_and_distribute(
     saved_ybzj_id: Optional[int] = None
 
     is_new_sample = ybzj_id is None
+    from app.crud.field_config import assert_page, scrub_hidden
+    scrub_hidden("sample_receive", jzxx, bbxx, ybzj)
+    assert_page(
+        "sample_receive",
+        {"JZXX": jzxx or {}, "BBXX": bbxx or {}, "YBZJ": ybzj or {}},
+        updating=not is_new_sample,
+    )
 
     # 获取F_ZZID（用于后续查询）
     fzzid = None

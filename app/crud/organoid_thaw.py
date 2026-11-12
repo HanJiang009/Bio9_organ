@@ -119,6 +119,14 @@ def save_thaw(
                 old_detail_data = get_thaw_detail_by_gdid(gdid)
             except Exception:
                 old_detail_data = None
+
+    from app.crud.field_config import assert_page, scrub_hidden
+    scrub_hidden("culture_thaw", fsjl, jzjmx)
+    assert_page(
+        "culture_thaw",
+        {"FSXX": fsjl or {}, "JZJMX": jzjmx or []},
+        updating=is_update,
+    )
     
     with adapter.connect() as conn:
         cur = conn.cursor()

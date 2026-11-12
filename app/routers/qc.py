@@ -307,6 +307,11 @@ async def submit(
         "F_ZKJD": F_ZKJD,
         "F_PYR": F_PYR,
     }
+    try:
+        from app.crud.field_config import assert_page
+        assert_page("culture_verify", payload)
+    except ValueError as exc:
+        return err(str(exc))
 
     denied = _deny_gdid(current_user, gdid)
     if denied:

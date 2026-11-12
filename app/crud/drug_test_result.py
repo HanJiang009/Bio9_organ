@@ -190,6 +190,17 @@ def save_experiment_record(
     gmd_raw = json.loads(data.get("GMD") or "{}") if data.get("GMD") else {}
     ic50_raw = json.loads(data.get("IC50") or "[]") if data.get("IC50") else []
     syjl_raw = json.loads(data.get("SYJL") or "{}") if data.get("SYJL") else {}
+    record_view: Dict[str, Any] = {}
+    if data.get("XTXBH") is not None:
+        record_view["XTXBH"] = xtxbh_raw
+    elif record_id is None:
+        record_view["XTXBH"] = []
+    if data.get("SYJL") is not None:
+        record_view["F_SYJL"] = syjl_raw
+    elif record_id is None:
+        record_view["F_SYJL"] = None
+    from app.crud.field_config import assert_page
+    assert_page("drug_record", record_view, updating=record_id is not None)
 
     # 替换附件索引为实际文件ID
     xtxbh_final = _replace_attachment_indices(xtxbh_raw, file_ids)

@@ -421,6 +421,15 @@ def create_order_from_ffjl(
     - 申请人 F_SQR: 用 T_FFJL.F_PYRY 去 T_USER 查询 F_Ktype，未找到时降级使用 F_FFCJR
     - 创建成功后将 T_FFJL.F_GDZT 更新为 '已创建'
     """
+    from app.crud.field_config import assert_page
+    assert_page("culture_order", {
+        "F_QYFS": qyfs,
+        "F_YBGG": ybgg,
+        "F_ZZBW": zzbw,
+        "F_PYSJ": pysj_str,
+        "F_PIPELINE_JM": pipeline_jm,
+        "F_PIPELINE_LX": pipeline_lx,
+    }, limit=["F_QYFS", "F_YBGG", "F_ZZBW", "F_PYSJ", "F_PIPELINE_JM", "F_PIPELINE_LX"])
     adapter = get_adapter()
     with adapter.connect() as conn:
         cur = conn.cursor()
@@ -1148,6 +1157,14 @@ def create_passage_order_from_order(
     pipeline_lx: List[int] | int | None = None,
     cdqxbzs: str | None = None,
 ) -> Dict[str, Any]:
+    from app.crud.field_config import assert_page
+    assert_page("culture_passage", {
+        "F_ZZBW": zzbw,
+        "F_YBGG": ybgg,
+        "F_PYSJ": pysj_str,
+        "F_PIPELINE_JM": pipeline_jm,
+        "F_PIPELINE_LX": pipeline_lx,
+    }, limit=["F_ZZBW", "F_YBGG", "F_PYSJ", "F_PIPELINE_JM", "F_PIPELINE_LX"])
     adapter = get_adapter()
     with adapter.connect() as conn:
         cur = conn.cursor()
@@ -1936,7 +1953,11 @@ def update_culture_order_with_files(data: Dict[str, Any], add_file_ids: List[int
     """
     import logging
     logger = logging.getLogger(__name__)
-    
+    from app.crud.field_config import assert_page, scrub_hidden
+    order_fields = ["F_ZZBW", "F_XYZL", "F_YBLY", "F_YBGG", "F_PYSJ", "F_PIPELINE_JM", "F_PIPELINE_LX", "F_QYFS"]
+    scrub_hidden("culture_order", data)
+    assert_page("culture_order", data, updating=True, limit=order_fields)
+
     adapter = get_adapter()
     rec_id = int(data.get("F_ID"))
     allowed_fields = [

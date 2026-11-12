@@ -37,6 +37,10 @@ def create_or_update_preprocess_by_gdid(
     operator: Optional[str] = None,
     from_pipeline_template: bool = False,
 ) -> Dict[str, Any]:
+	if not from_pipeline_template:
+		from app.crud.field_config import assert_page, scrub_hidden
+		scrub_hidden("culture_preprocess", fields)
+		assert_page("culture_preprocess", fields or {})
 	adapter = get_adapter()
 	
 	# 提前查询工单信息（独立连接）

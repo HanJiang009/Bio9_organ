@@ -37,6 +37,7 @@ ID_TO_LABEL = {
     "user_mgmt": "用户管理",
     "role_mgmt": "角色管理",
     "dict_mgmt": "字典值管理",
+    "field_config": "字段配置",
     "op_log": "操作日志",
     "automated_dashboard": "自动化看板",
 }

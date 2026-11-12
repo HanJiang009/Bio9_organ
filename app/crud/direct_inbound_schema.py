@@ -36,10 +36,11 @@ def ensure_schema() -> None:
 
 
 def _ensure_container_tables(adapter, cur, kind: str) -> None:
-    if not adapter.column_exists(cur, "T_RQ", "F_ID"):
-        cur.execute(_create_sql(kind, "T_RQ", """
+        if not adapter.column_exists(cur, "T_RQ", "F_ID"):
+            cur.execute(_create_sql(kind, "T_RQ", """
             F_RQBH VARCHAR(64),
             F_RQMC VARCHAR(200),
+            F_RQLB VARCHAR(64),
             F_CCWD VARCHAR(64),
             F_CS INT,
             F_JS INT,
@@ -49,8 +50,25 @@ def _ensure_container_tables(adapter, cur, kind: str) -> None:
             F_CJSJ VARCHAR(32),
             F_BZ VARCHAR(500)
         """))
-    if not adapter.column_exists(cur, "T_RQ_HW", "F_ID"):
-        cur.execute(_create_sql(kind, "T_RQ_HW", """
+        text_type = {
+            "mysql": "VARCHAR(64) NULL",
+            "sqlserver": "NVARCHAR(64) NULL",
+            "dameng": "VARCHAR(64)",
+        }[kind]
+        _add_column(adapter, cur, kind, "T_RQ", "F_RQLB", text_type)
+        if not adapter.column_exists(cur, "T_RQ_C", "F_ID"):
+            cur.execute(_create_sql(kind, "T_RQ_C", """
+            F_RQ_ID INT,
+            F_XH INT,
+            F_CMC VARCHAR(64),
+            F_JS INT,
+            F_CTS INT,
+            F_HXS INT,
+            F_HS INT,
+            F_LS INT
+        """))
+        if not adapter.column_exists(cur, "T_RQ_HW", "F_ID"):
+            cur.execute(_create_sql(kind, "T_RQ_HW", """
             F_RQ_ID INT,
             F_C INT,
             F_J INT,

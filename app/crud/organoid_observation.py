@@ -206,6 +206,9 @@ def create_observation(gcxx: Dict[str, Any], attachments: List[Dict[str, Any]] |
     attachments: 形如 [{"F_BS": 倍数, "F_WJ_ID": 文件ID}, ...]
     返回：{"F_ID": 新ID, "F_GDID": ..., "F_FJ": [ ... ]}
     """
+    if not from_pipeline_template:
+        from app.crud.field_config import assert_page
+        assert_page("culture_observe", gcxx or {})
     adapter = get_adapter()
     with adapter.connect() as conn:
         cur = conn.cursor()
@@ -512,6 +515,9 @@ def update_observation(
     Returns:
         {"F_ID": 记录ID, "F_GDID": 工单ID, "F_FJ": 附件列表, "qc_audit_id": 质控记录ID(可选)}
     """
+    from app.crud.field_config import assert_page, scrub_hidden
+    scrub_hidden("culture_observe", gcxx)
+    assert_page("culture_observe", gcxx or {}, updating=True)
     adapter = get_adapter()
     
     # 先查询原记录（用于质控审核）

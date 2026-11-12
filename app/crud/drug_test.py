@@ -351,6 +351,9 @@ def create_test_plan(data: Dict[str, Any], operator: Optional[str] = None, skip_
     
     # 清理数据中的特殊字符（避免GBK编码错误）
     data = _clean_data_for_db(data)
+    if not from_pipeline_template:
+        from app.crud.field_config import assert_page
+        assert_page("drug_plan", data)
 
     # ========== 前置参数校验 ==========
     if not data.get("F_GDID"):
@@ -973,6 +976,9 @@ def update_test_plan(data: Dict[str, Any], operator: Optional[str] = None) -> Di
     
     # 清理数据中的特殊Unicode字符
     data = _clean_data_for_db(data)
+    from app.crud.field_config import assert_page, scrub_hidden
+    scrub_hidden("drug_plan", data)
+    assert_page("drug_plan", data, updating=True)
     
     adapter = get_adapter()
     plan_id = data.get("F_ID")

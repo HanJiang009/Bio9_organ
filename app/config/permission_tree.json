@@ -29,6 +29,7 @@
     {"id": "shortcut_workstation", "label": "快捷工作台", "hasPermission": true, "shortcut": false},
     {"id": "op_log", "label": "操作日志", "hasPermission": true, "shortcut": false},
     {"id": "dict_mgmt", "label": "字典值管理", "hasPermission": true, "shortcut": false},
+    {"id": "field_config", "label": "字段配置", "hasPermission": true, "shortcut": false},
     {"id": "box_mgmt", "label": "盒子管理", "hasPermission": true, "shortcut": false},
     {"id": "sampling_standard", "label": "采集标准", "hasPermission": true, "shortcut": false},
     {"id": "automated_dashboard", "label": "自动化看板", "hasPermission": true, "shortcut": false}

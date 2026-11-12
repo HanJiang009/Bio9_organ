@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from random import uniform
 from app.schemas.common import ApiResponse
-from app.core.response import ok
+from app.core.response import ok, err
 from app.core.auth import require_roles, get_current_user_optional
 from fastapi import Form, File, UploadFile
 import json
@@ -305,6 +305,23 @@ async def save_mx(
                 add_ids.append(int(fid))
 
     operator = (current_user.get("F_Ktype") or current_user.get("F_YSM") or "") if current_user else ""
+
+    from app.crud.field_config import assert_page, scrub_hidden
+    culture_body = {
+        "PYJTJJL": pyjtjjl,
+        "PYXX_XH": pyxx_xh,
+        "PYXX_PB": pyxx_pb,
+        "PYXX_PY": pyxx_py,
+        "XHMSYJL": xhmsy_list,
+        "F_QXYCF": F_QXYCF,
+        "CDQXX": cdqxx,
+    }
+    culture_page = "culture_passage" if cdqxx is not None else "culture_grow"
+    try:
+        scrub_hidden(culture_page, culture_body)
+        assert_page(culture_page, culture_body, updating=True)
+    except ValueError as exc:
+        return err(str(exc))
 
     res = crud.save_mx(
         gdid=int(F_GDID),

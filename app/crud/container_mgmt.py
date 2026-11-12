@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.db.factory import get_adapter
 from app.crud.direct_inbound_schema import (
-    assert_slot_count,
+    _SLOT_MAX,
     ensure_schema,
     parse_dim,
 )
@@ -36,23 +36,54 @@ def _spec(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("容器编号不能为空")
     if not name:
         raise ValueError("容器名称不能为空")
-    layers = parse_dim(payload.get("F_CS"), "层数")
-    racks = parse_dim(payload.get("F_JS"), "每层架数")
-    drawers = parse_dim(payload.get("F_CTS"), "每架抽屉数")
-    boxes = parse_dim(payload.get("F_HXS"), "每抽屉盒数")
-    total = assert_slot_count(layers, racks, drawers, boxes)
+    layers = _parse_layers(payload.get("LAYERS") or payload.get("layers"))
+    total = sum(item["F_JS"] * item["F_CTS"] * item["F_HXS"] for item in layers)
+    if total > _SLOT_MAX:
+        raise ValueError(f"盒位总数不能超过 {_SLOT_MAX}，当前为 {total}")
+    first = layers[0]
     return {
         "F_RQBH": code,
         "F_RQMC": name,
+        "F_RQLB": _clean(payload.get("F_RQLB"), 64) or None,
         "F_CCWD": _clean(payload.get("F_CCWD"), 64) or None,
-        "F_CS": layers,
-        "F_JS": racks,
-        "F_CTS": drawers,
-        "F_HXS": boxes,
+        "F_CS": len(layers),
+        "F_JS": first["F_JS"],
+        "F_CTS": first["F_CTS"],
+        "F_HXS": first["F_HXS"],
         "F_ZT": _status(payload.get("F_ZT")),
         "F_BZ": _clean(payload.get("F_BZ"), 500) or None,
+        "LAYERS": layers,
         "F_ZHW": total,
     }
+
+
+def _parse_layers(raw: Any) -> List[Dict[str, Any]]:
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("空间结构请传 LAYERS 数组，每一层单独配置架数、抽屉数和盒数")
+    if len(raw) > 50:
+        raise ValueError("层数不能超过 50")
+    layers: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"第{index}层格式不正确")
+        name = _clean(item.get("F_CMC"), 64) or f"第{index}层"
+        racks = parse_dim(item.get("F_JS"), f"第{index}层冻存架数")
+        drawers = parse_dim(item.get("F_CTS"), f"第{index}层每架抽屉数")
+        boxes = parse_dim(item.get("F_HXS"), f"第{index}层每抽屉盒数")
+        rows = parse_dim(item.get("F_HS") or 10, f"第{index}层盒规格行数")
+        cols = parse_dim(item.get("F_LS") or 10, f"第{index}层盒规格列数")
+        layers.append({
+            "F_C": index,
+            "F_CMC": name,
+            "F_JS": racks,
+            "F_CTS": drawers,
+            "F_HXS": boxes,
+            "F_HS": rows,
+            "F_LS": cols,
+        })
+    return layers
 
 
 def _record(cols, row) -> Dict[str, Any]:
@@ -62,7 +93,7 @@ def _record(cols, row) -> Dict[str, Any]:
 def _get_row(adapter, rq_id: int) -> Dict[str, Any]:
     rows, cols = adapter.fetch_all(
         """
-        SELECT F_ID, F_RQBH, F_RQMC, F_CCWD, F_CS, F_JS, F_CTS, F_HXS, F_ZT, F_CJSJ, F_BZ
+        SELECT F_ID, F_RQBH, F_RQMC, F_RQLB, F_CCWD, F_CS, F_JS, F_CTS, F_HXS, F_ZT, F_CJSJ, F_BZ
         FROM T_RQ WHERE F_ID = ?
         """,
         [rq_id],
@@ -127,22 +158,48 @@ def _usage_map(adapter, rq_ids: List[int]) -> Dict[int, int]:
     return {rq_id: len(keys) for rq_id, keys in grouped.items()}
 
 
-def _present(row: Dict[str, Any], used: int) -> Dict[str, Any]:
-    layers = int(row.get("F_CS") or 0)
-    racks = int(row.get("F_JS") or 0)
-    drawers = int(row.get("F_CTS") or 0)
-    boxes = int(row.get("F_HXS") or 0)
-    total = layers * racks * drawers * boxes
+def _layer_view(item: Dict[str, Any]) -> Dict[str, Any]:
+    racks = int(item["F_JS"])
+    drawers = int(item["F_CTS"])
+    boxes = int(item["F_HXS"])
+    rows = int(item.get("F_HS") or 1)
+    cols = int(item.get("F_LS") or 1)
+    box_total = racks * drawers * boxes
+    return {
+        "F_C": int(item["F_C"]),
+        "F_CMC": item.get("F_CMC") or f"第{item['F_C']}层",
+        "F_JS": racks,
+        "F_CTS": drawers,
+        "F_HXS": boxes,
+        "F_HS": rows,
+        "F_LS": cols,
+        "F_HGG": f"{rows}×{cols}",
+        "F_HXW": box_total,
+        "F_RL": box_total * rows * cols,
+    }
+
+
+def _summary(layers: List[Dict[str, Any]]) -> str:
+    if not layers:
+        return ""
+    specs = [f"{item['F_JS']}×{item['F_CTS']}×{item['F_HXS']}" for item in layers]
+    if len(set(specs)) == 1:
+        return f"{len(layers)}×{specs[0]}"
+    return "、".join(f"第{item['F_C']}层{item['F_JS']}×{item['F_CTS']}×{item['F_HXS']}" for item in layers)
+
+
+def _present(row: Dict[str, Any], used: int, layers: List[Dict[str, Any]]) -> Dict[str, Any]:
+    shown = [_layer_view(item) for item in layers]
+    total = sum(item["F_HXW"] for item in shown)
     return {
         "F_ID": int(row["F_ID"]),
         "F_RQBH": row.get("F_RQBH"),
         "F_RQMC": row.get("F_RQMC"),
+        "F_RQLB": row.get("F_RQLB") or "",
         "F_CCWD": row.get("F_CCWD"),
-        "F_CS": layers,
-        "F_JS": racks,
-        "F_CTS": drawers,
-        "F_HXS": boxes,
-        "F_GG": f"{layers}×{racks}×{drawers}×{boxes}",
+        "F_CS": len(shown),
+        "F_GG": _summary(shown),
+        "LAYERS": shown,
         "F_YZY": used,
         "F_ZHW": total,
         "F_YSY": f"{used}/{total}",
@@ -154,18 +211,87 @@ def _present(row: Dict[str, Any], used: int) -> Dict[str, Any]:
     }
 
 
-def _expand_slots(cur, rq_id: int, layers: int, racks: int, drawers: int, boxes: int) -> None:
-    cur.execute("DELETE FROM T_RQ_HW WHERE F_RQ_ID = ?", (rq_id,))
-    batch = []
-    for layer in range(1, layers + 1):
-        for rack in range(1, racks + 1):
-            for drawer in range(1, drawers + 1):
-                for box in range(1, boxes + 1):
-                    batch.append((rq_id, layer, rack, drawer, box))
-    cur.executemany(
-        "INSERT INTO T_RQ_HW (F_RQ_ID, F_C, F_J, F_CT, F_H) VALUES (?, ?, ?, ?, ?)",
-        batch,
+def _fetch_layers(adapter, rows: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
+    ids = [int(row["F_ID"]) for row in rows]
+    grouped: Dict[int, List[Dict[str, Any]]] = {rq_id: [] for rq_id in ids}
+    if not ids:
+        return grouped
+    placeholders = ",".join(["?"] * len(ids))
+    stored, cols = adapter.fetch_all(
+        f"""
+        SELECT F_RQ_ID, F_XH, F_CMC, F_JS, F_CTS, F_HXS, F_HS, F_LS
+        FROM T_RQ_C
+        WHERE F_RQ_ID IN ({placeholders})
+        ORDER BY F_RQ_ID, F_XH
+        """,
+        ids,
     )
+    for raw in stored:
+        item = _record(cols, raw)
+        rq_id = int(item["F_RQ_ID"])
+        grouped.setdefault(rq_id, []).append({
+            "F_C": int(item["F_XH"]),
+            "F_CMC": item.get("F_CMC"),
+            "F_JS": int(item["F_JS"]),
+            "F_CTS": int(item["F_CTS"]),
+            "F_HXS": int(item["F_HXS"]),
+            "F_HS": int(item.get("F_HS") or 1),
+            "F_LS": int(item.get("F_LS") or 1),
+        })
+    headers = {int(row["F_ID"]): row for row in rows}
+    for rq_id, layers in grouped.items():
+        if layers:
+            continue
+        header = headers.get(rq_id) or {}
+        count = int(header.get("F_CS") or 0)
+        racks = int(header.get("F_JS") or 0)
+        drawers = int(header.get("F_CTS") or 0)
+        boxes = int(header.get("F_HXS") or 0)
+        if min(count, racks, drawers, boxes) < 1:
+            continue
+        grouped[rq_id] = [
+            {
+                "F_C": index,
+                "F_CMC": f"第{index}层",
+                "F_JS": racks,
+                "F_CTS": drawers,
+                "F_HXS": boxes,
+                "F_HS": 10,
+                "F_LS": 10,
+            }
+            for index in range(1, count + 1)
+        ]
+    return grouped
+
+
+def load_layers(adapter, rq_id: int, header: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _fetch_layers(adapter, [{**header, "F_ID": rq_id}]).get(rq_id, [])
+
+
+def _save_structure(cur, rq_id: int, layers: List[Dict[str, Any]]) -> None:
+    cur.execute("DELETE FROM T_RQ_C WHERE F_RQ_ID = ?", (rq_id,))
+    cur.execute("DELETE FROM T_RQ_HW WHERE F_RQ_ID = ?", (rq_id,))
+    cur.executemany(
+        """
+        INSERT INTO T_RQ_C (F_RQ_ID, F_XH, F_CMC, F_JS, F_CTS, F_HXS, F_HS, F_LS)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (rq_id, item["F_C"], item["F_CMC"], item["F_JS"], item["F_CTS"], item["F_HXS"], item["F_HS"], item["F_LS"])
+            for item in layers
+        ],
+    )
+    slots = []
+    for item in layers:
+        for rack in range(1, item["F_JS"] + 1):
+            for drawer in range(1, item["F_CTS"] + 1):
+                for box in range(1, item["F_HXS"] + 1):
+                    slots.append((rq_id, item["F_C"], rack, drawer, box))
+    if slots:
+        cur.executemany(
+            "INSERT INTO T_RQ_HW (F_RQ_ID, F_C, F_J, F_CT, F_H) VALUES (?, ?, ?, ?, ?)",
+            slots,
+        )
 
 
 def _assert_editable(adapter, rq_id: int) -> None:
@@ -188,6 +314,10 @@ def list_containers(payload: Dict[str, Any]) -> Dict[str, Any]:
         filters.append(f"({pred_code} OR {pred_name})")
         params.extend(p_code)
         params.extend(p_name)
+    category = (payload.get("F_RQLB") or "").strip()
+    if category:
+        filters.append("t.F_RQLB = ?")
+        params.append(category)
     for field, column in (("F_RQBH", "t.F_RQBH"), ("F_RQMC", "t.F_RQMC"), ("F_CCWD", "t.F_CCWD")):
         text = (payload.get(field) or "").strip()
         if not text:
@@ -202,7 +332,7 @@ def list_containers(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     where_sql = (" WHERE " + " AND ".join(filters)) if filters else ""
     base_sql = f"""
-    SELECT t.F_ID, t.F_RQBH, t.F_RQMC, t.F_CCWD, t.F_CS, t.F_JS, t.F_CTS, t.F_HXS,
+    SELECT t.F_ID, t.F_RQBH, t.F_RQMC, t.F_RQLB, t.F_CCWD, t.F_CS, t.F_JS, t.F_CTS, t.F_HXS,
            t.F_ZT, t.F_CJSJ, t.F_BZ
     FROM T_RQ t
     {where_sql}
@@ -220,8 +350,12 @@ def list_containers(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     items = [_record(cols, row) for row in rows]
     usage = _usage_map(adapter, [int(item["F_ID"]) for item in items])
+    layers = _fetch_layers(adapter, items)
     return {
-        "items": [_present(item, usage.get(int(item["F_ID"]), 0)) for item in items],
+        "items": [
+            _present(item, usage.get(int(item["F_ID"]), 0), layers.get(int(item["F_ID"]), []))
+            for item in items
+        ],
         "total": total,
     }
 
@@ -234,12 +368,10 @@ def list_enabled() -> Dict[str, Any]:
             "F_ID": item["F_ID"],
             "F_RQBH": item["F_RQBH"],
             "F_RQMC": item["F_RQMC"],
+            "F_RQLB": item["F_RQLB"],
             "F_CCWD": item["F_CCWD"],
-            "F_CS": item["F_CS"],
-            "F_JS": item["F_JS"],
-            "F_CTS": item["F_CTS"],
-            "F_HXS": item["F_HXS"],
             "F_GG": item["F_GG"],
+            "LAYERS": item["LAYERS"],
             "F_YSY": item["F_YSY"],
         }
         for item in data["items"]
@@ -254,7 +386,7 @@ def get_container(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("F_ID 不能为空")
     adapter = get_adapter()
     row = _get_row(adapter, int(rq_id))
-    return _present(row, len(occupied_keys(adapter, int(rq_id))))
+    return _present(row, len(occupied_keys(adapter, int(rq_id))), load_layers(adapter, int(rq_id), row))
 
 
 def create_container(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -269,17 +401,17 @@ def create_container(payload: Dict[str, Any], user: Dict[str, Any] | None = None
         cur.execute(
             """
             INSERT INTO T_RQ (
-                F_RQBH, F_RQMC, F_CCWD, F_CS, F_JS, F_CTS, F_HXS, F_ZT, F_CJSJ, F_BZ
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                F_RQBH, F_RQMC, F_RQLB, F_CCWD, F_CS, F_JS, F_CTS, F_HXS, F_ZT, F_CJSJ, F_BZ
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                spec["F_RQBH"], spec["F_RQMC"], spec["F_CCWD"],
+                spec["F_RQBH"], spec["F_RQMC"], spec["F_RQLB"], spec["F_CCWD"],
                 spec["F_CS"], spec["F_JS"], spec["F_CTS"], spec["F_HXS"],
                 spec["F_ZT"], now, spec["F_BZ"],
             ),
         )
         rq_id = int(adapter.last_insert_id(cur))
-        _expand_slots(cur, rq_id, spec["F_CS"], spec["F_JS"], spec["F_CTS"], spec["F_HXS"])
+        _save_structure(cur, rq_id, spec["LAYERS"])
         conn.commit()
     _log("新增容器", spec["F_RQBH"], {"F_ID": rq_id}, user)
     return get_container({"F_ID": rq_id})
@@ -311,17 +443,17 @@ def update_container(payload: Dict[str, Any], user: Dict[str, Any] | None = None
         cur.execute(
             """
             UPDATE T_RQ
-            SET F_RQBH = ?, F_RQMC = ?, F_CCWD = ?, F_CS = ?, F_JS = ?,
+            SET F_RQBH = ?, F_RQMC = ?, F_RQLB = ?, F_CCWD = ?, F_CS = ?, F_JS = ?,
                 F_CTS = ?, F_HXS = ?, F_ZT = ?, F_BZ = ?
             WHERE F_ID = ?
             """,
             (
-                spec["F_RQBH"], spec["F_RQMC"], spec["F_CCWD"],
+                spec["F_RQBH"], spec["F_RQMC"], spec["F_RQLB"], spec["F_CCWD"],
                 spec["F_CS"], spec["F_JS"], spec["F_CTS"], spec["F_HXS"],
                 spec["F_ZT"], spec["F_BZ"], rq_id,
             ),
         )
-        _expand_slots(cur, rq_id, spec["F_CS"], spec["F_JS"], spec["F_CTS"], spec["F_HXS"])
+        _save_structure(cur, rq_id, spec["LAYERS"])
         conn.commit()
     _log("修改容器", spec["F_RQBH"], {"F_ID": rq_id}, user)
     return get_container({"F_ID": rq_id})
@@ -348,6 +480,7 @@ def delete_container(payload: Dict[str, Any], user: Dict[str, Any] | None = None
         if int(cur.fetchone()[0] or 0) > 0:
             raise ValueError("容器已有样本占用，不能删除")
         cur.execute("DELETE FROM T_RQ_HW WHERE F_RQ_ID = ?", (rq_id,))
+        cur.execute("DELETE FROM T_RQ_C WHERE F_RQ_ID = ?", (rq_id,))
         cur.execute("DELETE FROM T_RQ WHERE F_ID = ?", (rq_id,))
         conn.commit()
     _log("删除容器", row.get("F_RQBH"), {"F_ID": rq_id}, user)
@@ -363,15 +496,14 @@ def container_tree(payload: Dict[str, Any]) -> Dict[str, Any]:
     rq_id = int(rq_id)
     adapter = get_adapter()
     row = _get_row(adapter, rq_id)
-    layers = int(row.get("F_CS") or 0)
-    racks = int(row.get("F_JS") or 0)
-    drawers = int(row.get("F_CTS") or 0)
-    boxes = int(row.get("F_HXS") or 0)
+    layer_rows = load_layers(adapter, rq_id, row)
+    layer_map = {int(item["F_C"]): item for item in layer_rows}
     used = occupied_keys(adapter, rq_id)
     header = {
         "F_ID": rq_id,
         "F_RQBH": row.get("F_RQBH"),
         "F_RQMC": row.get("F_RQMC"),
+        "F_RQLB": row.get("F_RQLB") or "",
         "F_CCWD": row.get("F_CCWD"),
         "F_ZT": row.get("F_ZT"),
     }
@@ -385,35 +517,45 @@ def container_tree(payload: Dict[str, Any]) -> Dict[str, Any]:
         layer_no = parse_dim(layer_no, "层")
         rack_no = parse_dim(rack_no, "架")
         drawer_no = parse_dim(drawer_no, "抽屉")
-        if layer_no > layers or rack_no > racks or drawer_no > drawers:
+        spec = layer_map.get(layer_no)
+        if not spec or rack_no > int(spec["F_JS"]) or drawer_no > int(spec["F_CTS"]):
             raise ValueError("所选层、架或抽屉超出容器规格")
         header.update({
             "F_C": layer_no,
             "F_J": rack_no,
             "F_CT": drawer_no,
-            "boxes": _boxes(used, layer_no, rack_no, drawer_no, boxes),
+            "boxes": _boxes(used, layer_no, rack_no, drawer_no, int(spec["F_HXS"])),
         })
         return header
-    header["layers"] = [
-        {
-            "F_C": layer,
-            "racks": [
-                {
-                    "F_J": rack,
-                    "drawers": [
-                        {
-                            "F_CT": drawer,
-                            "boxes": _boxes(used, layer, rack, drawer, boxes),
-                        }
-                        for drawer in range(1, drawers + 1)
-                    ],
-                }
-                for rack in range(1, racks + 1)
-            ],
-        }
-        for layer in range(1, layers + 1)
-    ]
+    header["layers"] = [_tree_layer(item, used) for item in layer_rows]
     return header
+
+
+def _tree_layer(item: Dict[str, Any], used: Set[Tuple[int, int, int, int]]) -> Dict[str, Any]:
+    layer = int(item["F_C"])
+    racks = []
+    for rack in range(1, int(item["F_JS"]) + 1):
+        drawers = []
+        occupied = 0
+        total = 0
+        for drawer in range(1, int(item["F_CTS"]) + 1):
+            boxes = _boxes(used, layer, rack, drawer, int(item["F_HXS"]))
+            drawers.append({"F_CT": drawer, "boxes": boxes})
+            total += len(boxes)
+            occupied += sum(1 for box in boxes if box["F_ZY"])
+        racks.append({
+            "F_J": rack,
+            "F_GS": occupied,
+            "F_ZYL": round(occupied * 100 / total, 1) if total else 0,
+            "drawers": drawers,
+        })
+    return {
+        "F_C": layer,
+        "F_CMC": item.get("F_CMC"),
+        "F_HS": int(item.get("F_HS") or 1),
+        "F_LS": int(item.get("F_LS") or 1),
+        "racks": racks,
+    }
 
 
 def _boxes(used: Set[Tuple[int, int, int, int]], layer: int, rack: int, drawer: int, boxes: int) -> List[Dict[str, Any]]:

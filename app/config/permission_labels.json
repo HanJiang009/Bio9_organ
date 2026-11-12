@@ -30,6 +30,7 @@
     "shortcut_workstation": "快捷工作台",
     "op_log": "操作日志",
     "dict_mgmt": "字典值管理",
+    "field_config": "字段配置",
     "box_mgmt": "盒子管理",
     "sampling_standard": "采集标准",
     "automated_dashboard": "自动化看板"

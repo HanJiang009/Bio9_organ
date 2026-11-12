@@ -189,6 +189,15 @@ def create_freeze(
                 "F_MG_DCSL": exist_check[7],
                 "F_SXBS": exist_check[8],
             }
+
+    if not from_pipeline_template:
+        from app.crud.field_config import assert_page, scrub_hidden
+        scrub_hidden("culture_freeze", dcjl, xhmsy_list)
+        assert_page(
+            "culture_freeze",
+            {"DCJL": dcjl or {}, "XHMSYJL": xhmsy_list or []},
+            updating=is_update,
+        )
     
     with adapter.connect() as conn:
         cur = conn.cursor()
