@@ -7,6 +7,7 @@ from app.crud.direct_inbound_schema import (
     _SLOT_MAX,
     ensure_schema,
     parse_dim,
+    row_label,
 )
 from app.crud.op_log import insert_op_log
 
@@ -113,39 +114,44 @@ def _code_taken(adapter, code: str, exclude_id: Optional[int] = None) -> bool:
     return bool(rows)
 
 
-def _well(value: Any) -> int:
-    if value is None or str(value).strip() == "":
-        return 1
-    return int(value)
+def _stored_wz(item: Dict[str, Any]) -> str:
+    text = str(item.get("F_WZ") or "").strip().upper()
+    if text:
+        return text
+    row = item.get("F_RQHX")
+    col = item.get("F_RQHL")
+    if row in (None, "") or col in (None, ""):
+        return "A1"
+    return f"{row_label(int(row) - 1)}{int(col)}"
 
 
-def occupied_tubes(adapter, rq_id: int) -> Dict[Tuple[int, int, int, int, int, int], Dict[str, Any]]:
-    """仍占用管位的管子。已出库的不再占位。同一管位只保留一条。"""
+def occupied_tubes(adapter, rq_id: int) -> Dict[Tuple[int, int, int, int, str], Dict[str, Any]]:
+    """仍占用管位的管子。已出库的不再占位。同一盒子的同一 F_WZ 只保留一条。"""
     rows, cols = adapter.fetch_all(
         """
-        SELECT F_ID, F_SGBH, F_RQC, F_RQJ, F_RQCT, F_RQH, F_RQHX, F_RQHL
+        SELECT F_ID, F_SGBH, F_RQC, F_RQJ, F_RQCT, F_RQH, F_WZ, F_RQHX, F_RQHL
         FROM T_YBFZ
         WHERE F_RQ_ID = ? AND (F_KCZT IS NULL OR F_KCZT <> ?)
         """,
         [rq_id, "已出库"],
     )
-    found: Dict[Tuple[int, int, int, int, int, int], Dict[str, Any]] = {}
+    found: Dict[Tuple[int, int, int, int, str], Dict[str, Any]] = {}
     for row in rows:
         item = _record(cols, row)
         place = (item.get("F_RQC"), item.get("F_RQJ"), item.get("F_RQCT"), item.get("F_RQH"))
         if any(part is None or str(part).strip() == "" for part in place):
             continue
-        key = tuple(int(part) for part in place) + (_well(item.get("F_RQHX")), _well(item.get("F_RQHL")))
+        wz = _stored_wz(item)
+        key = tuple(int(part) for part in place) + (wz,)
         found[key] = {
             "F_YBFZ_ID": int(item["F_ID"]),
             "F_SGBH": str(item.get("F_SGBH") or ""),
-            "F_HX": key[4],
-            "F_LX": key[5],
+            "F_WZ": wz,
         }
     return found
 
 
-def occupied_keys(adapter, rq_id: int) -> Set[Tuple[int, int, int, int, int, int]]:
+def occupied_keys(adapter, rq_id: int) -> Set[Tuple[int, int, int, int, str]]:
     """仍占用管位的管子。已出库的不再占位。"""
     return set(occupied_tubes(adapter, rq_id))
 
@@ -549,9 +555,18 @@ def container_tree(payload: Dict[str, Any]) -> Dict[str, Any]:
     return header
 
 
+def _wz_sort_key(wz: str) -> Tuple[int, int]:
+    letters = "".join(char for char in wz if "A" <= char <= "Z")
+    digits = "".join(char for char in wz if char.isdigit())
+    row_idx = 0
+    for char in letters:
+        row_idx = row_idx * 26 + (ord(char) - ord("A")) + 1
+    return row_idx, int(digits or 0)
+
+
 def _tree_layer(
     item: Dict[str, Any],
-    tubes: Dict[Tuple[int, int, int, int, int, int], Dict[str, Any]],
+    tubes: Dict[Tuple[int, int, int, int, str], Dict[str, Any]],
 ) -> Dict[str, Any]:
     layer = int(item["F_C"])
     rows = int(item.get("F_HS") or 1)
@@ -583,7 +598,7 @@ def _tree_layer(
 
 
 def _boxes(
-    tubes: Dict[Tuple[int, int, int, int, int, int], Dict[str, Any]],
+    tubes: Dict[Tuple[int, int, int, int, str], Dict[str, Any]],
     layer: int,
     rack: int,
     drawer: int,
@@ -594,14 +609,13 @@ def _boxes(
         if key[0] != layer or key[1] != rack or key[2] != drawer:
             continue
         grouped.setdefault(key[3], []).append({
-            "F_HX": tube["F_HX"],
-            "F_LX": tube["F_LX"],
+            "F_WZ": tube["F_WZ"],
             "F_SGBH": tube["F_SGBH"],
             "F_YBFZ_ID": tube["F_YBFZ_ID"],
         })
     result = []
     for box in range(1, boxes + 1):
-        wells = sorted(grouped.get(box, []), key=lambda item: (item["F_HX"], item["F_LX"]))
+        wells = sorted(grouped.get(box, []), key=lambda item: _wz_sort_key(item["F_WZ"]))
         result.append({"F_H": box, "F_ZY": bool(wells), "tubes": wells})
     return result
 

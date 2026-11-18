@@ -1,14 +1,25 @@
-"""直接入库：把已有分装管放进容器，并写入现有运输单。"""
+"""直接入库：按分装预览结果写入样本分装表，并放进容器。"""
 import json
 from datetime import datetime
 from typing import Any, Dict, List
 
 from app.db.factory import get_adapter
 from app.crud.container_mgmt import load_enabled_container, load_layers, occupied_keys
-from app.crud.direct_inbound_schema import ensure_schema, format_ccwz, lock_id
+from app.crud.direct_inbound_schema import ensure_schema, format_ccwz, normalize_wz
 from app.crud.op_log import insert_op_log
-from app.crud.sample_linkage import _parse_datetime, _resolve_operator
-from app.crud.stock_audit import DOC_IN, AUDIT_PENDING, inbound_needs_audit, insert_bill
+from app.crud.sample_linkage import (
+    _fetch_ybfz_by_sgbhs,
+    _parse_datetime,
+    _resolve_operator,
+    _validate_items_ybglx,
+)
+from app.crud.stock_audit import (
+    DOC_IN,
+    AUDIT_PENDING,
+    SOURCE_INBOUND,
+    inbound_needs_audit,
+    insert_bill,
+)
 
 
 def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -26,41 +37,54 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
     code = str(container.get("F_RQBH") or "")
 
     seen_slots = set()
-    tube_ids: List[int] = []
+    seen_codes = set()
     for item in items:
-        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"])
-        if slot in seen_slots:
-            raise ValueError(f"管位重复: {_slot_text(slot)}")
-        seen_slots.add(slot)
         spec = layer_map.get(item["F_C"])
         if (
             not spec
             or item["F_J"] > int(spec["F_JS"])
             or item["F_CT"] > int(spec["F_CTS"])
             or item["F_H"] > int(spec["F_HXS"])
-            or item["F_HX"] > int(spec.get("F_HS") or 1)
-            or item["F_LX"] > int(spec.get("F_LS") or 1)
         ):
-            raise ValueError(f"管位超出容器规格: {_slot_text(slot)}")
-        tube_ids.append(item["F_YBFZ_ID"])
+            raise ValueError(f"管位超出容器规格: {_slot_text(item)}")
+        try:
+            item["F_WZ"] = normalize_wz(item["F_WZ"], int(spec.get("F_HS") or 1), int(spec.get("F_LS") or 1))
+        except ValueError as exc:
+            raise ValueError(str(exc))
+        item["F_HS"] = int(spec.get("F_HS") or 1)
+        item["F_LS"] = int(spec.get("F_LS") or 1)
+        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_WZ"])
+        if slot in seen_slots:
+            raise ValueError(f"管位重复: {_slot_text(item)}")
+        seen_slots.add(slot)
+        if item["F_SGBH"] in seen_codes:
+            raise ValueError(f"试管编号重复: {item['F_SGBH']}")
+        seen_codes.add(item["F_SGBH"])
 
     adapter = get_adapter()
-    tubes = _load_tubes(adapter, tube_ids)
-    for item in items:
-        tube = tubes.get(item["F_YBFZ_ID"])
-        if not tube:
-            raise ValueError(f"找不到分装记录ID: {item['F_YBFZ_ID']}")
-        _assert_tube_free(tube)
+    _validate_items_ybglx(items)
+    existing = _fetch_ybfz_by_sgbhs([item["F_SGBH"] for item in items])
+    if existing:
+        raise ValueError("试管编号已存在: " + ", ".join(existing))
 
     occupied = occupied_keys(adapter, rq_id)
     for item in items:
-        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"])
+        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_WZ"])
         if slot in occupied:
-            raise ValueError(f"管位已被占用: {_slot_text(slot)}")
+            raise ValueError(f"管位已被占用: {_slot_text(item)}")
 
     need_audit = inbound_needs_audit()
-    tube_status = AUDIT_PENDING if need_audit else "运送中"
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if need_audit:
+        order_status = AUDIT_PENDING
+        tube_yszt = "未运送"
+        tube_kczt = None
+        received_at = None
+    else:
+        order_status = "已接收"
+        tube_yszt = "已接收"
+        tube_kczt = "在库"
+        received_at = now
     applicant = payload.get("F_FQR") or _resolve_operator(user, adapter)
     applied_at = _parse_datetime(payload.get("F_FQSJ")) or now
     remark = payload.get("F_BZ")
@@ -69,15 +93,12 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
 
     placed = []
     for item in items:
-        slot = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"])
-        tube = tubes[item["F_YBFZ_ID"]]
         placed.append({
             **item,
-            "F_SGBH": tube.get("F_SGBH"),
-            "F_HZH": tube.get("F_HZH"),
-            "F_CCWZ": format_ccwz(code, *slot),
+            "F_CCWZ": format_ccwz(code, item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_WZ"]),
         })
 
+    tube_ids: List[int] = []
     with adapter.connect() as conn:
         cur = conn.cursor()
         for item in placed:
@@ -85,39 +106,23 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
                 """
                 SELECT F_ID FROM T_YBFZ
                 WHERE F_RQ_ID = ? AND F_RQC = ? AND F_RQJ = ? AND F_RQCT = ? AND F_RQH = ?
-                  AND COALESCE(F_RQHX, 1) = ? AND COALESCE(F_RQHL, 1) = ?
+                  AND UPPER(F_WZ) = ?
                   AND (F_KCZT IS NULL OR F_KCZT <> ?)
                 """,
                 (
                     rq_id, item["F_C"], item["F_J"], item["F_CT"], item["F_H"],
-                    item["F_HX"], item["F_LX"], "已出库",
+                    item["F_WZ"], "已出库",
                 ),
             )
-            found = cur.fetchone()
-            well = (item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"])
-            if found and int(found[0]) not in tube_ids:
-                raise ValueError(f"管位已被占用: {_slot_text(well)}")
-            values = [
-                rq_id, item["F_C"], item["F_J"], item["F_CT"], item["F_H"],
-                item["F_HX"], item["F_LX"], item["F_CCWZ"], tube_status,
-            ]
-            sets = (
-                "F_RQ_ID = ?, F_RQC = ?, F_RQJ = ?, F_RQCT = ?, F_RQH = ?, "
-                "F_RQHX = ?, F_RQHL = ?, F_CCWZ = ?, F_YSZT = ?"
+            if cur.fetchone():
+                raise ValueError(f"管位已被占用: {_slot_text(item)}")
+            item["F_RQ_ID"] = rq_id
+            item["F_CZR"] = applicant
+            tube_id = _insert_tube(
+                cur, adapter, item, tube_yszt, tube_kczt, received_at, now, destination,
             )
-            if destination:
-                sets += ", F_YSMDD = ?"
-                values.append(destination)
-            values.append(item["F_YBFZ_ID"])
-            cur.execute(
-                f"""
-                UPDATE T_YBFZ SET {sets}
-                WHERE F_ID = ? AND (F_YSZT IS NULL OR F_YSZT = '' OR F_YSZT = ?)
-                """,
-                tuple(values + ["未运送"]),
-            )
-            if cur.rowcount == 0:
-                raise ValueError(f"分装记录 {item['F_YBFZ_ID']} 状态已变化，不能直接入库")
+            item["F_YBFZ_ID"] = tube_id
+            tube_ids.append(tube_id)
 
         cur.execute(
             """
@@ -128,7 +133,8 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
             """,
             (
                 order_no, json.dumps(tube_ids, ensure_ascii=False), applicant, applied_at,
-                tube_status, len(tube_ids), remark, None, None, None, destination,
+                order_status, len(tube_ids), remark,
+                applicant if received_at else None, received_at, None, destination,
             ),
         )
         order_id = int(adapter.last_insert_id(cur))
@@ -143,7 +149,9 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
                 sample_count=len(tube_ids),
                 applicant=applicant,
                 applied_at=applied_at,
+                source=SOURCE_INBOUND,
                 detail={
+                    "F_LY": SOURCE_INBOUND,
                     "F_DJLX": DOC_IN,
                     "F_YSDH": order_no,
                     "F_RQ_ID": rq_id,
@@ -157,11 +165,11 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
             )
         conn.commit()
 
-    _log(user, {"F_YSDH": order_no, "F_ID": order_id, "YBFZ": tube_ids, "F_YSDZT": tube_status})
+    _log(user, {"F_YSDH": order_no, "F_ID": order_id, "YBFZ": tube_ids, "F_YSDZT": order_status})
     return {
         "F_ID": order_id,
         "F_YSDH": order_no,
-        "F_YSDZT": tube_status,
+        "F_YSDZT": order_status,
         "F_YBSL": len(tube_ids),
         "F_RQ_ID": rq_id,
         "F_RQBH": code,
@@ -170,73 +178,93 @@ def store_samples(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -
     }
 
 
-def _items(raw: Any) -> List[Dict[str, int]]:
+def _items(raw: Any) -> List[Dict[str, Any]]:
     if isinstance(raw, dict):
         raw = [raw]
     if not isinstance(raw, list) or not raw:
         raise ValueError("请提供至少一个入库样本")
-    items: List[Dict[str, int]] = []
-    seen_ids = set()
+    items: List[Dict[str, Any]] = []
     for index, raw_item in enumerate(raw, start=1):
         if not isinstance(raw_item, dict):
             raise ValueError(f"第{index}条样本格式不正确")
+        item = dict(raw_item)
+        code = str(item.get("F_SGBH") or "").strip()
+        zzid = str(item.get("F_ZZID") or "").strip()
+        wz = str(item.get("F_WZ") or "").strip()
+        if not code or not zzid or not wz:
+            raise ValueError(f"第{index}条样本须带试管编号、标本号和盒内位置")
         try:
-            tube_id = int(raw_item.get("F_YBFZ_ID"))
-            slot = {
-                "F_YBFZ_ID": tube_id,
-                "F_C": int(raw_item.get("F_C")),
-                "F_J": int(raw_item.get("F_J")),
-                "F_CT": int(raw_item.get("F_CT")),
-                "F_H": int(raw_item.get("F_H")),
-                "F_HX": int(raw_item.get("F_HX")),
-                "F_LX": int(raw_item.get("F_LX")),
-            }
+            item["F_C"] = int(item.get("F_C"))
+            item["F_J"] = int(item.get("F_J"))
+            item["F_CT"] = int(item.get("F_CT"))
+            item["F_H"] = int(item.get("F_H"))
         except (TypeError, ValueError):
-            raise ValueError(f"第{index}条样本的分装ID、层架抽屉盒和盒内行列必须是整数")
-        if min(slot["F_C"], slot["F_J"], slot["F_CT"], slot["F_H"], slot["F_HX"], slot["F_LX"]) < 1:
-            raise ValueError(f"第{index}条样本的层架抽屉盒和盒内行列须从 1 开始")
-        if tube_id in seen_ids:
-            raise ValueError(f"分装记录重复: {tube_id}")
-        seen_ids.add(tube_id)
-        items.append(slot)
+            raise ValueError(f"第{index}条样本的层架抽屉盒必须是整数")
+        if min(item["F_C"], item["F_J"], item["F_CT"], item["F_H"]) < 1:
+            raise ValueError(f"第{index}条样本的层架抽屉盒须从 1 开始")
+        item["F_SGBH"] = code
+        item["F_ZZID"] = zzid
+        item["F_WZ"] = wz
+        item.pop("F_ID", None)
+        item.pop("F_YBFZ_ID", None)
+        items.append(item)
     return items
 
 
-def _load_tubes(adapter, tube_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-    placeholders = ",".join(["?"] * len(tube_ids))
-    rows, cols = adapter.fetch_all(
-        f"""
-        SELECT F_ID, F_SGBH, F_HZH, F_KCZT, F_YSZT, F_RQ_ID, F_LOCK_CKD_ID
-        FROM T_YBFZ WHERE F_ID IN ({placeholders})
-        """,
-        tube_ids,
+def _optional_int(value: Any) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return int(value)
+
+
+def _insert_tube(
+    cur, adapter, item: Dict[str, Any], yszt: str | None, kczt: str | None,
+    received_at: str | None, now: str, destination: Any,
+) -> int:
+    columns = [
+        "F_SGBH", "F_ZZID", "F_YBZJ_ID", "F_PYGD_ID", "F_DC",
+        "F_YBLX", "F_YBGLX", "F_CCXS", "F_FGS", "F_TJ", "F_XBSL", "F_SPREC",
+        "F_BZ", "F_CZR", "F_CJSJ", "F_HZH", "F_HS", "F_LS",
+        "F_BRBH", "F_ZYH", "F_MZH", "F_XM", "F_XB", "F_NL", "F_NLDW",
+        "F_MZ", "F_HY", "F_ZY", "F_DZ", "F_DH", "F_CHH", "F_SFZH",
+        "F_LCZD", "F_LYKS", "F_KS", "F_CXSJ", "F_XMBH",
+        "F_WZ", "F_YSZT", "F_KCZT", "F_RKSJ", "F_JSSJ",
+        "F_RQ_ID", "F_RQC", "F_RQJ", "F_RQCT", "F_RQH", "F_CCWZ",
+    ]
+    values = [
+        item.get("F_SGBH"), item.get("F_ZZID"),
+        _optional_int(item.get("F_YBZJ_ID")), _optional_int(item.get("F_PYGD_ID")),
+        item.get("F_DC"), item.get("F_YBLX"), item.get("F_YBGLX"), item.get("F_CCXS"),
+        _optional_int(item.get("F_FGS")), item.get("F_TJ"), item.get("F_XBSL"), item.get("F_SPREC"),
+        item.get("F_BZ"), item.get("F_CZR"), now, item.get("F_HZH"),
+        item.get("F_HS"), item.get("F_LS"),
+        item.get("F_BRBH"), item.get("F_ZYH"), item.get("F_MZH"), item.get("F_XM"),
+        item.get("F_XB"), _optional_int(item.get("F_NL")), item.get("F_NLDW"),
+        item.get("F_MZ"), item.get("F_HY"), item.get("F_ZY"), item.get("F_DZ"),
+        item.get("F_DH"), item.get("F_CHH"), item.get("F_SFZH"),
+        item.get("F_LCZD"), item.get("F_LYKS"), item.get("F_KS"), item.get("F_CXSJ"),
+        item.get("F_XMBH"), item.get("F_WZ"), yszt, kczt, received_at, received_at,
+        item["F_RQ_ID"], item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_CCWZ"],
+    ]
+    if destination:
+        columns.append("F_YSMDD")
+        values.append(destination)
+    holders = ", ".join(["?"] * len(columns))
+    cur.execute(
+        f"INSERT INTO T_YBFZ ({', '.join(columns)}) VALUES ({holders})",
+        tuple(values),
     )
-    return {int(dict(zip(cols, row))["F_ID"]): dict(zip(cols, row)) for row in rows}
+    return int(adapter.last_insert_id(cur))
 
 
-def _assert_tube_free(tube: Dict[str, Any]) -> None:
-    tube_id = int(tube["F_ID"])
-    stock = str(tube.get("F_KCZT") or "").strip()
-    transport = str(tube.get("F_YSZT") or "").strip()
-    if stock in ("在库", "已出库", "出库中"):
-        raise ValueError(f"分装记录 {tube_id} 当前库存状态为{stock}，不能直接入库")
-    if transport not in ("", "未运送"):
-        raise ValueError(f"分装记录 {tube_id} 当前运输状态为{transport}，不能直接入库")
-    if lock_id(tube.get("F_LOCK_CKD_ID")):
-        raise ValueError(f"分装记录 {tube_id} 已被出库单锁定")
-    if lock_id(tube.get("F_RQ_ID")):
-        raise ValueError(f"分装记录 {tube_id} 已放入容器")
-
-
-def _slot_text(slot) -> str:
-    layer, rack, drawer, box, row, col = slot
-    return f"{layer}层{rack}架{drawer}抽屉{box}盒{row}行{col}列"
+def _slot_text(item: Dict[str, Any]) -> str:
+    return f"{item['F_C']}层{item['F_J']}架{item['F_CT']}抽屉{item['F_H']}盒{item['F_WZ']}"
 
 
 def _box_text(items: List[Dict[str, Any]]) -> str:
     seen = []
     for item in items:
-        text = _slot_text((item["F_C"], item["F_J"], item["F_CT"], item["F_H"], item["F_HX"], item["F_LX"]))
+        text = _slot_text(item)
         if text not in seen:
             seen.append(text)
     return ",".join(seen)

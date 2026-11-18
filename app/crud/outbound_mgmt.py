@@ -93,6 +93,86 @@ def _fetch_outbound_sample_details(ybfz_ids: List[int]) -> List[Dict[str, Any]]:
     return [tmp[fid] for fid in ybfz_ids if fid in tmp]
 
 
+def outbound_audit_items(ybfz_ids: List[int]) -> List[Dict[str, Any]]:
+    """出库审核快照。列对齐发起出库页，F_WZ 保持 A1 这种写法。"""
+    if not ybfz_ids:
+        return []
+    adapter = get_adapter()
+    placeholders = ",".join(["?"] * len(ybfz_ids))
+    sql = f"""
+    SELECT
+        f.F_ID,
+        f.F_SGBH,
+        f.F_ZZID,
+        COALESCE(NULLIF(TRIM(f.F_YBLX), ''), NULLIF(TRIM(y.F_BBLX), '')) AS F_YBLX,
+        COALESCE(NULLIF(TRIM(p.F_DC), ''), NULLIF(TRIM(f.F_DC), '')) AS F_DC,
+        COALESCE(NULLIF(TRIM(p.F_AZ), ''), NULLIF(TRIM(y.F_AZ), '')) AS F_AZ,
+        f.F_TJ,
+        f.F_XBSL,
+        f.F_RKSJ,
+        f.F_WZ,
+        f.F_HZH,
+        f.F_CCWZ
+    FROM T_YBFZ f
+    LEFT JOIN T_PYGD p ON p.F_ID = f.F_PYGD_ID
+    LEFT JOIN (
+        SELECT F_ZZID, MAX(F_BBLX) AS F_BBLX, MAX(F_AZ) AS F_AZ
+        FROM T_YBZJ
+        GROUP BY F_ZZID
+    ) y ON y.F_ZZID = f.F_ZZID
+    WHERE f.F_ID IN ({placeholders})
+    """
+    rows, cols = adapter.fetch_all(sql, ybfz_ids)
+    idx = {c: i for i, c in enumerate(cols)}
+    tmp: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        sample = {c: row[idx[c]] for c in cols}
+        sample["F_ID"] = int(sample["F_ID"])
+        sample["F_RKSJ"] = _format_datetime(sample.get("F_RKSJ"))
+        sample["F_CCWZ"] = "" if not sample.get("F_CCWZ") else str(sample.get("F_CCWZ"))
+        tmp[sample["F_ID"]] = sample
+    return [tmp[fid] for fid in ybfz_ids if fid in tmp]
+
+
+def complete_outbound_audit_detail(doc_id: Any, detail: Dict[str, Any]) -> Dict[str, Any]:
+    """老审核单快照缺列或附件时，按当前出库单补齐。已有的值保留。"""
+    detail = dict(detail or {})
+    items = [dict(item) for item in (detail.get("items") or []) if isinstance(item, dict)]
+    keys = ("F_YBLX", "F_DC", "F_AZ", "F_TJ", "F_XBSL", "F_RKSJ", "F_WZ")
+    ids: List[int] = []
+    for item in items:
+        try:
+            ids.append(int(item.get("F_ID")))
+        except (TypeError, ValueError):
+            continue
+    if ids and any(item.get(key) in (None, "") for item in items for key in keys):
+        fresh = {row["F_ID"]: row for row in outbound_audit_items(ids)}
+        for item in items:
+            try:
+                extra = fresh.get(int(item.get("F_ID"))) or {}
+            except (TypeError, ValueError):
+                extra = {}
+            for key, value in extra.items():
+                if item.get(key) in (None, ""):
+                    item[key] = value
+            if not item.get("F_CCWZ"):
+                item["F_CCWZ"] = extra.get("F_CCWZ") or ""
+    detail["items"] = items
+    if "F_FJ" not in detail:
+        detail["F_FJ"] = _outbound_order_files(doc_id)
+    return detail
+
+
+def _outbound_order_files(doc_id: Any) -> List[Dict[str, Any]]:
+    if not doc_id:
+        return []
+    adapter = get_adapter()
+    rows, _cols = adapter.fetch_all("SELECT F_FJ FROM T_CKD WHERE F_ID = ?", [int(doc_id)])
+    if not rows:
+        return []
+    return _resolve_fj_info(rows[0][0])
+
+
 def _resolve_fj_info(fj_raw: Any) -> List[Dict[str, Any]]:
     """将 T_CKD.F_FJ（JSON文件ID数组）转为文件信息列表。"""
     if not fj_raw:
@@ -130,6 +210,15 @@ def _lock_value(value: Any) -> int | None:
     return lock_id(value)
 
 
+def _tube_label(tube: Dict[str, Any]) -> str:
+    """给用户看的样本标识。优先试管编号，没有时用标本号。"""
+    for key in ("F_SGBH", "F_ZZID"):
+        text = str(tube.get(key) or "").strip()
+        if text:
+            return text
+    return str(tube.get("F_ID") or "")
+
+
 def _tube_can_outbound(kczt: str, locked_to: int | None, source_ckd_id: Optional[int]) -> bool:
     """新单只收未锁定的在库管。再次申请还接受本单锁定的在库管，以及历史单上仍为出库中的管。"""
     if source_ckd_id:
@@ -144,10 +233,11 @@ def create_outbound(
     user: Dict[str, Any] | None = None,
     source_ckd_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """发起出库单。管子保持在库，并用 F_LOCK_CKD_ID 锁到本单。
+    """发起出库单。
 
-    出库审核开启时出库单为待审核，通过后才是待出库并推送外部系统。
-    审核关闭时直接待出库。真正出库完成仍由外部确认写成已出库。
+    转运管子保持在库并锁定。审核开启时为待审核，通过后待出库并推送外部系统；
+    审核关闭时直接待出库，出完仍由外部确认。
+    容器里的管子不推外部系统：审核关闭时直接已出库，审核开启时先待审核，通过后已出库。
     """
     from app.crud.direct_inbound_schema import ensure_schema
     from app.crud.stock_audit import AUDIT_PENDING, DOC_OUT, insert_bill, outbound_needs_audit
@@ -174,16 +264,17 @@ def create_outbound(
     if missing:
         raise ValueError(f"找不到以下分装记录ID: {missing}")
 
-    blocked: List[int] = []
+    blocked: List[str] = []
     for fid in ybfz_ids:
         tube = found[fid]
         kczt = str(tube.get("F_KCZT") or "").strip()
         if not _tube_can_outbound(kczt, _lock_value(tube.get("F_LOCK_CKD_ID")), source_ckd_id):
-            blocked.append(fid)
+            blocked.append(_tube_label(tube))
     if blocked:
+        names = "、".join(blocked)
         if source_ckd_id:
-            raise ValueError(f"以下样本状态已变更，无法重新申请出库: {blocked}")
-        raise ValueError(f"以下样本不在库或已被其他出库单锁定，无法发起出库: {blocked}")
+            raise ValueError(f"以下样本状态已变更，无法重新申请出库: {names}")
+        raise ValueError(f"以下样本不在库或已被其他出库单锁定，无法发起出库: {names}")
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ckdh = f"CKDH{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
@@ -192,7 +283,20 @@ def create_outbound(
     lxfx = payload.get("F_LXFX")
     bz = payload.get("F_BZ")
     need_audit = outbound_needs_audit()
-    order_status = AUDIT_PENDING if need_audit else CKDZT_PENDING
+    container_flags = [
+        bool(str(found[fid].get("F_CCWZ") or "").strip()) for fid in ybfz_ids
+    ]
+    if any(container_flags) and not all(container_flags):
+        raise ValueError("容器里的管子和转运管子不能放在同一张出库单")
+    container_mode = bool(container_flags) and all(container_flags)
+    if container_mode and not need_audit:
+        order_status = CKDZT_DONE
+        mx_status = MXZT_DONE
+        mx_time = now_str
+    else:
+        order_status = AUDIT_PENDING if need_audit else CKDZT_PENDING
+        mx_status = MXZT_PENDING
+        mx_time = None
 
     fj_ids_raw = payload.get("F_FJ_IDS") or []
     if isinstance(fj_ids_raw, (int, str)):
@@ -225,13 +329,20 @@ def create_outbound(
             cur.execute(
                 """
                 INSERT INTO T_CKD_MX (F_CKD_ID, F_YBFZ_ID, F_SGBH, F_MXZT, F_CKSJ)
-                SELECT ?, F_ID, F_SGBH, ?, NULL FROM T_YBFZ WHERE F_ID = ?
+                SELECT ?, F_ID, F_SGBH, ?, ? FROM T_YBFZ WHERE F_ID = ?
                 """,
-                (ckd_id, MXZT_PENDING, fid),
+                (ckd_id, mx_status, mx_time, fid),
             )
 
-        update_sql = f"UPDATE T_YBFZ SET F_LOCK_CKD_ID = ? WHERE F_ID IN ({placeholders})"
-        cur.execute(update_sql, tuple([ckd_id] + ybfz_ids))
+        if container_mode and not need_audit:
+            update_sql = (
+                f"UPDATE T_YBFZ SET F_KCZT = ?, F_CKSJ = ?, F_LOCK_CKD_ID = NULL "
+                f"WHERE F_ID IN ({placeholders})"
+            )
+            cur.execute(update_sql, tuple(["已出库", now_str] + ybfz_ids))
+        else:
+            update_sql = f"UPDATE T_YBFZ SET F_LOCK_CKD_ID = ? WHERE F_ID IN ({placeholders})"
+            cur.execute(update_sql, tuple([ckd_id] + ybfz_ids))
         if need_audit:
             insert_bill(
                 cur, adapter,
@@ -249,16 +360,8 @@ def create_outbound(
                     "F_SQSJ": _format_datetime(sqsj),
                     "F_LXFX": lxfx,
                     "F_BZ": bz,
-                    "items": [
-                        {
-                            "F_ID": fid,
-                            "F_SGBH": found[fid].get("F_SGBH"),
-                            "F_ZZID": found[fid].get("F_ZZID"),
-                            "F_HZH": found[fid].get("F_HZH"),
-                            "F_CCWZ": found[fid].get("F_CCWZ") or "",
-                        }
-                        for fid in ybfz_ids
-                    ],
+                    "F_FJ": _resolve_fj_info(fj_json),
+                    "items": outbound_audit_items(ybfz_ids),
                 },
             )
 
@@ -288,9 +391,12 @@ def create_outbound(
         "items": _fetch_outbound_sample_details(ybfz_ids),
     }
 
-    # 待审核先不推送。审核通过后再推。审核关闭时仍在创建成功后推送。
+    # 待审核先不推送。容器里的管子在本系统直接出完，不推外部系统。
     if need_audit:
         result["external_push"] = {"attempted": False, "success": False, "skipped": "待审核"}
+        return result
+    if container_mode:
+        result["external_push"] = {"attempted": False, "success": False, "skipped": "容器出库"}
         return result
     try:
         from app.core.outbound_push_client import push_outbound_order
@@ -475,12 +581,12 @@ def resubmit_outbound(payload: Dict[str, Any], user: Dict[str, Any] | None = Non
     ensure_schema()
     placeholders = ",".join(["?"] * len(remaining_ids))
     kczt_rows, kczt_cols = adapter.fetch_all(
-        f"SELECT F_ID, F_KCZT, F_LOCK_CKD_ID FROM T_YBFZ WHERE F_ID IN ({placeholders})",
+        f"SELECT F_ID, F_KCZT, F_LOCK_CKD_ID, F_SGBH, F_ZZID FROM T_YBFZ WHERE F_ID IN ({placeholders})",
         remaining_ids,
     )
     kczt_idx = {c: i for i, c in enumerate(kczt_cols)}
     invalid = [
-        int(r[kczt_idx["F_ID"]])
+        _tube_label({name: r[kczt_idx[name]] for name in kczt_idx})
         for r in kczt_rows
         if not _tube_can_outbound(
             str(r[kczt_idx["F_KCZT"]] or "").strip(),
@@ -489,7 +595,7 @@ def resubmit_outbound(payload: Dict[str, Any], user: Dict[str, Any] | None = Non
         )
     ]
     if invalid:
-        raise ValueError(f"以下样本状态已变更，无法重新申请出库: {invalid}")
+        raise ValueError(f"以下样本状态已变更，无法重新申请出库: {'、'.join(invalid)}")
 
     new_payload = {
         "YBFZ": remaining_ids,

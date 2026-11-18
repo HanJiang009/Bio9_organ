@@ -87,6 +87,11 @@ def _ensure_audit_tables(adapter, cur, kind: str) -> None:
     else:
         detail = "CLOB"
         flag = "VARCHAR(8)"
+    source_type = {
+        "mysql": "VARCHAR(16) NULL",
+        "sqlserver": "NVARCHAR(16) NULL",
+        "dameng": "VARCHAR(16)",
+    }[kind]
     if not adapter.column_exists(cur, "T_CRKSH", "F_ID"):
         cur.execute(_create_sql(kind, "T_CRKSH", f"""
             F_DJLX VARCHAR(16),
@@ -100,8 +105,11 @@ def _ensure_audit_tables(adapter, cur, kind: str) -> None:
             F_SHR VARCHAR(64),
             F_SHSJ VARCHAR(32),
             F_SHBZ VARCHAR(1000),
-            F_DETAIL {detail}
+            F_DETAIL {detail},
+            F_LY VARCHAR(16)
         """))
+    else:
+        _add_column(adapter, cur, kind, "T_CRKSH", "F_LY", source_type)
     if not adapter.column_exists(cur, "T_CRKSH_CFG", "F_ID"):
         cur.execute(_create_sql(kind, "T_CRKSH_CFG", f"""
             F_CKSH {flag},
@@ -158,8 +166,37 @@ def assert_slot_count(layers: int, racks: int, drawers: int, boxes: int) -> int:
     return total
 
 
-def format_ccwz(code: str, layer: int, rack: int, drawer: int, box: int, row: int, col: int) -> str:
-    return f"{code} / {layer}层 / {rack}架 / {drawer}抽屉 / {box}盒 / {row}行{col}列"
+def row_label(row_idx: int) -> str:
+    """0 起的行号转成字母。0 是 A，26 是 AA。"""
+    label = ""
+    number = row_idx
+    while True:
+        label = chr(ord("A") + number % 26) + label
+        number = number // 26 - 1
+        if number < 0:
+            break
+    return label
+
+
+def normalize_wz(value, rows: int, cols: int) -> str:
+    """把盒内位置收成 A1 这种写法，并按该层盒子的行数、列数校验。"""
+    text = str(value or "").strip().upper()
+    letters = "".join(char for char in text if "A" <= char <= "Z")
+    digits = "".join(char for char in text if char.isdigit())
+    if not letters or not digits or letters + digits != text:
+        raise ValueError(f"盒内位置格式不正确: {value}")
+    row_idx = 0
+    for char in letters:
+        row_idx = row_idx * 26 + (ord(char) - ord("A")) + 1
+    row_idx -= 1
+    col = int(digits)
+    if row_idx < 0 or row_idx >= rows or col < 1 or col > cols:
+        raise ValueError(f"盒内位置超出盒子规格: {text}")
+    return f"{row_label(row_idx)}{col}"
+
+
+def format_ccwz(code: str, layer: int, rack: int, drawer: int, box: int, wz: str) -> str:
+    return f"{code} / {layer}层 / {rack}架 / {drawer}抽屉 / {box}盒 / {wz}"
 
 
 def lock_id(value) -> int | None:

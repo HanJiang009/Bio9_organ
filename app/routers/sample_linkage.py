@@ -100,9 +100,10 @@ def sample_allocation_save(
     try:
         data = crud.save_sample_allocation(payload.model_dump(), current_user)
         skipped = data.get("skipped") or []
-        msg = "保存成功"
+        pending = ((data.get("transport") or {}).get("F_YSDZT")) == "待审核"
+        msg = "已提交入库审核" if pending else "保存成功"
         if skipped:
-            msg = f"保存成功（跳过 {len(skipped)} 条已存在记录）"
+            msg = f"{msg}（跳过 {len(skipped)} 条已存在记录）"
         return ok(data, msg)
     except ValueError as exc:
         return err(str(exc))
@@ -128,7 +129,8 @@ def sample_allocation_scan_save(
     try:
         data = crud.save_sample_allocation_with_scan(payload.model_dump(), current_user)
         warning = data.pop("warning", None)
-        msg = warning if warning else "保存成功"
+        pending = ((data.get("transport") or {}).get("F_YSDZT")) == "待审核"
+        msg = warning if warning else ("已提交入库审核" if pending else "保存成功")
         return ok(data, msg)
     except ValueError as exc:
         return err(str(exc))

@@ -119,8 +119,10 @@ _LYKS_EXPR = "COALESCE(NULLIF(TRIM(f.F_LYKS), ''), NULLIF(TRIM(y.F_BBLY), ''))"
 
 
 def _fill_display_fields(record: Dict[str, Any]) -> None:
+    from app.crud.direct_inbound_schema import lock_id
     record["F_YBZT"] = _stock_status_label(record.get("F_KCZT"), record.get("F_YSZT"))
     record["F_CCWZ"] = "" if not record.get("F_CCWZ") else str(record.get("F_CCWZ"))
+    record["F_SD"] = lock_id(record.get("F_LOCK_CKD_ID")) is not None
 
 
 def _as_filter_values(raw: Any) -> List[str]:

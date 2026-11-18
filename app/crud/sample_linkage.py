@@ -1298,10 +1298,11 @@ def _apply_ybfz_transport_update(
     *,
     inserted_ids: List[int],
     transport_ids: List[int],
+    hold_for_audit: bool = False,
 ) -> None:
     """UPDATE 路径：将暂存分装记录更新为运输状态（或保持未运送）。"""
     fz_id = int(item["F_ID"])
-    yszt = "运送中" if item.get("F_SFYS") else "未运送"
+    yszt = "未运送" if (not item.get("F_SFYS") or hold_for_audit) else "运送中"
     set_parts = ["F_YSZT = ?"]
     set_vals: List[Any] = [yszt]
     if item.get("F_HS") is not None:
@@ -1317,6 +1318,94 @@ def _apply_ybfz_transport_update(
     inserted_ids.append(fz_id)
     if item.get("F_SFYS"):
         transport_ids.append(fz_id)
+
+
+def _linkage_audit_detail(
+    cur,
+    transport_ids: List[int],
+    *,
+    order_no: str,
+    applicant: Any,
+    applied_at: Any,
+    remark: Any,
+    destination: Any,
+) -> tuple[Dict[str, Any], str]:
+    """样本关联审核快照。F_WZ 保持 A1，供前端按盒子规格画格子。"""
+    placeholders = ",".join(["?"] * len(transport_ids))
+    cur.execute(
+        f"""
+        SELECT F_ID, F_SGBH, F_ZZID, F_DC, F_YBLX, F_YBGLX, F_CCXS,
+               F_FGS, F_TJ, F_XBSL, F_BZ, F_HZH, F_HS, F_LS, F_WZ
+        FROM T_YBFZ
+        WHERE F_ID IN ({placeholders})
+        """,
+        tuple(transport_ids),
+    )
+    cols = [c[0] for c in cur.description]
+    by_id: Dict[int, Dict[str, Any]] = {}
+    for row in cur.fetchall():
+        item = dict(zip(cols, row))
+        by_id[int(item["F_ID"])] = item
+    items: List[Dict[str, Any]] = []
+    boxes: List[Dict[str, Any]] = []
+    seen_boxes: Dict[str, Dict[str, Any]] = {}
+    for fid in transport_ids:
+        raw = by_id.get(int(fid))
+        if not raw:
+            continue
+        hzh = str(raw.get("F_HZH") or "").strip()
+        items.append({
+            "F_YBFZ_ID": int(raw["F_ID"]),
+            "F_SGBH": raw.get("F_SGBH"),
+            "F_ZZID": raw.get("F_ZZID"),
+            "F_DC": raw.get("F_DC"),
+            "F_YBLX": raw.get("F_YBLX"),
+            "F_YBGLX": raw.get("F_YBGLX"),
+            "F_CCXS": raw.get("F_CCXS"),
+            "F_FGS": raw.get("F_FGS"),
+            "F_TJ": raw.get("F_TJ"),
+            "F_XBSL": raw.get("F_XBSL"),
+            "F_BZ": raw.get("F_BZ"),
+            "F_HZH": hzh,
+            "F_WZ": raw.get("F_WZ"),
+            "F_HS": raw.get("F_HS"),
+            "F_LS": raw.get("F_LS"),
+        })
+        if hzh and hzh not in seen_boxes:
+            seen_boxes[hzh] = {
+                "F_HZH": hzh,
+                "F_HS": raw.get("F_HS"),
+                "F_LS": raw.get("F_LS"),
+                "F_TPLT_NAME": None,
+            }
+            boxes.append(seen_boxes[hzh])
+    if seen_boxes:
+        box_holders = ",".join(["?"] * len(seen_boxes))
+        cur.execute(
+            f"""
+            SELECT b.F_HZH, t.F_NAME
+            FROM T_BOX b
+            LEFT JOIN T_BOX_TPLT t ON t.F_ID = b.F_TEMPLATE_ID
+            WHERE b.F_HZH IN ({box_holders})
+            """,
+            tuple(seen_boxes.keys()),
+        )
+        for hzh, name in cur.fetchall():
+            box = seen_boxes.get(str(hzh or "").strip())
+            if box is not None:
+                box["F_TPLT_NAME"] = name
+    detail = {
+        "F_LY": "样本关联",
+        "F_DJLX": "入库",
+        "F_YSDH": order_no,
+        "F_FQR": applicant,
+        "F_FQSJ": applied_at,
+        "F_YSMDD": destination or "",
+        "F_BZ": remark or "",
+        "BOXES": boxes,
+        "items": items,
+    }
+    return detail, ",".join(box["F_HZH"] for box in boxes)
 
 
 def save_sample_allocation(payload: Dict[str, Any], user: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -1421,6 +1510,10 @@ def save_sample_allocation(payload: Dict[str, Any], user: Dict[str, Any] | None 
     inserted_ids: List[int] = []
     transport_ids: List[int] = []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    hold_for_audit = False
+    if any(item.get("F_SFYS") for item in [*new_items, *update_items]):
+        from app.crud.stock_audit import inbound_needs_audit as _inbound_needs_audit
+        hold_for_audit = _inbound_needs_audit()
 
     with adapter.connect() as conn:
         cur = conn.cursor()
@@ -1430,7 +1523,7 @@ def save_sample_allocation(payload: Dict[str, Any], user: Dict[str, Any] | None 
 
         # ── INSERT 路径：全新分装记录 ────────────────────────────────
         for item in new_items:
-            yszt = "运送中" if item.get("F_SFYS") else "未运送"
+            yszt = "未运送" if (not item.get("F_SFYS") or hold_for_audit) else "运送中"
             try:
                 cur.execute(
                     """
@@ -1505,7 +1598,10 @@ def save_sample_allocation(payload: Dict[str, Any], user: Dict[str, Any] | None 
                     continue
                 item["F_ID"] = existing_id
                 _apply_ybfz_transport_update(
-                    cur, item, inserted_ids=inserted_ids, transport_ids=transport_ids
+                    cur, item,
+                    inserted_ids=inserted_ids,
+                    transport_ids=transport_ids,
+                    hold_for_audit=hold_for_audit,
                 )
                 continue
 
@@ -1520,7 +1616,10 @@ def save_sample_allocation(payload: Dict[str, Any], user: Dict[str, Any] | None 
         # ── UPDATE 路径：暂存后发起运输（F_ID 已存在于 T_YBFZ） ───────
         for item in update_items:
             _apply_ybfz_transport_update(
-                cur, item, inserted_ids=inserted_ids, transport_ids=transport_ids
+                cur, item,
+                inserted_ids=inserted_ids,
+                transport_ids=transport_ids,
+                hold_for_audit=hold_for_audit,
             )
 
         conn.commit()
@@ -1535,7 +1634,16 @@ def save_sample_allocation(payload: Dict[str, Any], user: Dict[str, Any] | None 
         yssj = payload.get("F_FQSJ") or now_str
         ysbz = payload.get("F_BZ")
         ysmdd = payload.get("F_YSMDD")
-        ysdzt = "运送中"
+        from app.crud.stock_audit import (
+            AUDIT_PENDING,
+            DOC_IN,
+            SOURCE_LINKAGE,
+            inbound_needs_audit,
+            insert_bill,
+        )
+        need_audit = inbound_needs_audit()
+        ysdzt = AUDIT_PENDING if need_audit else "运送中"
+        audit_id = None
 
         with adapter.connect() as conn:
             cur = conn.cursor()
@@ -1560,10 +1668,39 @@ def save_sample_allocation(payload: Dict[str, Any], user: Dict[str, Any] | None 
                     ysmdd,
                 ),
             )
+            order_id = int(adapter.last_insert_id(cur))
             if ysmdd:
                 placeholders = ",".join(["?"] * len(transport_ids))
                 update_sql = f"UPDATE T_YBFZ SET F_YSMDD = ? WHERE F_ID IN ({placeholders})"
                 cur.execute(update_sql, tuple([ysmdd] + transport_ids))
+            if need_audit:
+                placeholders = ",".join(["?"] * len(transport_ids))
+                cur.execute(
+                    f"UPDATE T_YBFZ SET F_YSZT = ? WHERE F_ID IN ({placeholders})",
+                    tuple(["未运送"] + transport_ids),
+                )
+                detail, box_text = _linkage_audit_detail(
+                    cur,
+                    transport_ids,
+                    order_no=ysdh,
+                    applicant=ysr,
+                    applied_at=yssj,
+                    remark=ysbz,
+                    destination=ysmdd,
+                )
+                audit_id = insert_bill(
+                    cur,
+                    adapter,
+                    doc_type=DOC_IN,
+                    doc_id=order_id,
+                    doc_no=ysdh,
+                    box_no=box_text,
+                    sample_count=len(transport_ids),
+                    applicant=ysr,
+                    applied_at=str(yssj),
+                    detail=detail,
+                    source=SOURCE_LINKAGE,
+                )
             conn.commit()
 
         # 运输发起后自动更新盒子状态
@@ -1573,6 +1710,8 @@ def save_sample_allocation(payload: Dict[str, Any], user: Dict[str, Any] | None 
             "F_YSDH": ysdh,
             "F_YSXX": transport_ids,
             "F_YSDZT": ysdzt,
+            "F_LY": SOURCE_LINKAGE if need_audit else None,
+            "F_SHID": audit_id,
             "items": _fetch_transport_sample_details(transport_ids),
         }
 

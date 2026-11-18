@@ -1,4 +1,4 @@
-"""出入库审核开关和审核单。入库只覆盖直接入库，出库覆盖出库单。"""
+"""出入库审核开关和审核单。入库覆盖直接入库和样本关联发起运输，出库覆盖出库单。"""
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -14,6 +14,8 @@ AUDIT_PENDING = "待审核"
 AUDIT_PASS = "审核通过"
 AUDIT_REJECT = "审核驳回"
 OUTBOUND_READY = "待出库"
+SOURCE_INBOUND = "样本入库"
+SOURCE_LINKAGE = "样本关联"
 
 
 class StockAuditPermissionError(PermissionError):
@@ -46,6 +48,15 @@ def _flag(value: Any) -> str:
 
 def _record(cols, row) -> Dict[str, Any]:
     return dict(zip(cols, row))
+
+
+def _source_label(source: Any, doc_type: Any) -> str | None:
+    text = str(source or "").strip()
+    if text:
+        return text
+    if str(doc_type or "") == DOC_IN:
+        return SOURCE_INBOUND
+    return None
 
 
 def assert_super_admin(user: Dict[str, Any] | None) -> None:
@@ -107,17 +118,18 @@ def insert_bill(
     applicant: Any,
     applied_at: str,
     detail: Dict[str, Any],
+    source: str | None = None,
 ) -> int:
     text = (box_no or "")[:1000]
     cur.execute(
         """
         INSERT INTO T_CRKSH (
-            F_DJLX, F_DJID, F_DJH, F_HH, F_YBSL, F_SQR, F_SQSJ, F_SHZT, F_DETAIL
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            F_DJLX, F_DJID, F_DJH, F_HH, F_YBSL, F_SQR, F_SQSJ, F_SHZT, F_DETAIL, F_LY
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             doc_type, doc_id, doc_no, text, sample_count, applicant, applied_at,
-            AUDIT_PENDING, json.dumps(detail, ensure_ascii=False),
+            AUDIT_PENDING, json.dumps(detail, ensure_ascii=False), source,
         ),
     )
     return int(adapter.last_insert_id(cur))
@@ -159,8 +171,15 @@ def list_audits(payload: Dict[str, Any]) -> Dict[str, Any]:
     where_sql = (" WHERE " + " AND ".join(filters)) if filters else ""
     base_sql = f"""
     SELECT t.F_ID, t.F_DJLX, t.F_DJID, t.F_DJH, t.F_HH, t.F_YBSL,
-           t.F_SQR, t.F_SQSJ, t.F_SHZT, t.F_SHR, t.F_SHSJ, t.F_SHBZ
+           t.F_SQR, t.F_SQSJ, t.F_SHZT, t.F_SHR, t.F_SHSJ, t.F_SHBZ, t.F_LY,
+           CASE
+               WHEN t.F_DJLX = '{DOC_IN}' THEN ys.F_YSDZT
+               WHEN t.F_DJLX = '{DOC_OUT}' THEN ck.F_CKDZT
+               ELSE NULL
+           END AS F_DJZT
     FROM T_CRKSH t
+    LEFT JOIN T_YSXX ys ON t.F_DJLX = '{DOC_IN}' AND ys.F_ID = t.F_DJID
+    LEFT JOIN T_CKD ck ON t.F_DJLX = '{DOC_OUT}' AND ck.F_ID = t.F_DJID
     {where_sql}
     """
     count_sql = f"SELECT COUNT(1) FROM T_CRKSH t {where_sql}"
@@ -178,6 +197,7 @@ def list_audits(payload: Dict[str, Any]) -> Dict[str, Any]:
         record["F_SQSJ"] = _format_datetime(record.get("F_SQSJ"))
         record["F_SHSJ"] = _format_datetime(record.get("F_SHSJ"))
         record["F_KSH"] = str(record.get("F_SHZT") or "") == AUDIT_PENDING
+        record["F_LY"] = _source_label(record.get("F_LY"), record.get("F_DJLX"))
         items.append(record)
     return {"items": items, "total": total}
 
@@ -190,9 +210,17 @@ def get_audit(payload: Dict[str, Any]) -> Dict[str, Any]:
     adapter = get_adapter()
     rows, cols = adapter.fetch_all(
         """
-        SELECT F_ID, F_DJLX, F_DJID, F_DJH, F_HH, F_YBSL, F_SQR, F_SQSJ,
-               F_SHZT, F_SHR, F_SHSJ, F_SHBZ, F_DETAIL
-        FROM T_CRKSH WHERE F_ID = ?
+        SELECT t.F_ID, t.F_DJLX, t.F_DJID, t.F_DJH, t.F_HH, t.F_YBSL, t.F_SQR, t.F_SQSJ,
+               t.F_SHZT, t.F_SHR, t.F_SHSJ, t.F_SHBZ, t.F_DETAIL, t.F_LY,
+               CASE
+                   WHEN t.F_DJLX = '{DOC_IN}' THEN ys.F_YSDZT
+                   WHEN t.F_DJLX = '{DOC_OUT}' THEN ck.F_CKDZT
+                   ELSE NULL
+               END AS F_DJZT
+        FROM T_CRKSH t
+        LEFT JOIN T_YSXX ys ON t.F_DJLX = '{DOC_IN}' AND ys.F_ID = t.F_DJID
+        LEFT JOIN T_CKD ck ON t.F_DJLX = '{DOC_OUT}' AND ck.F_ID = t.F_DJID
+        WHERE t.F_ID = ?
         """,
         [int(audit_id)],
     )
@@ -203,6 +231,13 @@ def get_audit(payload: Dict[str, Any]) -> Dict[str, Any]:
     record.pop("F_DETAIL", None)
     record["F_SQSJ"] = _format_datetime(record.get("F_SQSJ"))
     record["F_SHSJ"] = _format_datetime(record.get("F_SHSJ"))
+    record["F_LY"] = _source_label(record.get("F_LY"), record.get("F_DJLX"))
+    detail = dict(detail)
+    if record.get("F_LY"):
+        detail.setdefault("F_LY", record["F_LY"])
+    if str(record.get("F_DJLX") or "") == DOC_OUT:
+        from app.crud.outbound_mgmt import complete_outbound_audit_detail
+        detail = complete_outbound_audit_detail(record.get("F_DJID"), detail)
     record["F_DETAIL"] = detail
     record["F_KSH"] = str(record.get("F_SHZT") or "") == AUDIT_PENDING
     return record
@@ -251,10 +286,10 @@ def review_audit(payload: Dict[str, Any], user: Dict[str, Any] | None = None) ->
         doc_type = str(bill.get("F_DJLX") or "")
         doc_id = int(bill["F_DJID"])
         if doc_type == DOC_IN:
-            _review_inbound(cur, doc_id, passed)
+            _review_inbound(cur, doc_id, passed, now)
         elif doc_type == DOC_OUT:
-            _review_outbound(cur, doc_id, passed)
-            if passed:
+            push_outbound = _review_outbound(cur, doc_id, passed, now)
+            if push_outbound:
                 push_outbound_id = doc_id
         else:
             raise ValueError(f"未知单据类型: {doc_type}")
@@ -301,7 +336,7 @@ def clear_tube_outbound_lock(cur, tube_id: int) -> None:
     cur.execute("UPDATE T_YBFZ SET F_LOCK_CKD_ID = NULL WHERE F_ID = ?", (tube_id,))
 
 
-def _review_inbound(cur, transport_id: int, passed: bool) -> None:
+def _review_inbound(cur, transport_id: int, passed: bool, now: str) -> None:
     cur.execute("SELECT F_ID, F_YSXX, F_YSDZT FROM T_YSXX WHERE F_ID = ?", (transport_id,))
     row = cur.fetchone()
     if not row:
@@ -310,6 +345,17 @@ def _review_inbound(cur, transport_id: int, passed: bool) -> None:
         raise ValueError("运输单状态已变化，不能审核")
     tube_ids = _tube_ids(row[1])
     if passed:
+        if _tubes_in_container(cur, tube_ids):
+            cur.execute(
+                """
+                UPDATE T_YSXX
+                SET F_YSDZT = ?, F_JSSJ = ?
+                WHERE F_ID = ? AND F_YSDZT = ?
+                """,
+                (AUDIT_PASS, now, transport_id, AUDIT_PENDING),
+            )
+            _mark_tubes_in_stock(cur, tube_ids, now)
+            return
         cur.execute(
             "UPDATE T_YSXX SET F_YSDZT = ? WHERE F_ID = ? AND F_YSDZT = ?",
             ("运送中", transport_id, AUDIT_PENDING),
@@ -323,18 +369,25 @@ def _review_inbound(cur, transport_id: int, passed: bool) -> None:
     if not tube_ids:
         return
     placeholders = ",".join(["?"] * len(tube_ids))
+    if _tubes_in_container(cur, tube_ids):
+        cur.execute(
+            f"""
+            UPDATE T_YBFZ
+            SET F_RQ_ID = NULL, F_RQC = NULL, F_RQJ = NULL, F_RQCT = NULL, F_RQH = NULL,
+                F_RQHX = NULL, F_RQHL = NULL, F_WZ = NULL, F_CCWZ = NULL, F_YSZT = ?
+            WHERE F_ID IN ({placeholders})
+            """,
+            tuple(["未运送"] + tube_ids),
+        )
+        return
     cur.execute(
-        f"""
-        UPDATE T_YBFZ
-        SET F_RQ_ID = NULL, F_RQC = NULL, F_RQJ = NULL, F_RQCT = NULL, F_RQH = NULL,
-            F_RQHX = NULL, F_RQHL = NULL, F_CCWZ = NULL, F_YSZT = ?
-        WHERE F_ID IN ({placeholders}) AND F_YSZT = ?
-        """,
-        tuple(["未运送"] + tube_ids + [AUDIT_PENDING]),
+        f"UPDATE T_YBFZ SET F_YSZT = ? WHERE F_ID IN ({placeholders})",
+        tuple(["未运送"] + tube_ids),
     )
 
 
-def _review_outbound(cur, outbound_id: int, passed: bool) -> None:
+def _review_outbound(cur, outbound_id: int, passed: bool, now: str) -> bool:
+    """通过时，容器里的管子直接出库并返回 False。转运管子改为待出库并返回 True，由调用方推送外部系统。"""
     cur.execute("SELECT F_CKDZT FROM T_CKD WHERE F_ID = ?", (outbound_id,))
     row = cur.fetchone()
     if not row:
@@ -342,11 +395,14 @@ def _review_outbound(cur, outbound_id: int, passed: bool) -> None:
     if str(row[0] or "").strip() != AUDIT_PENDING:
         raise ValueError("出库单状态已变化，不能审核")
     if passed:
+        if _container_outbound(cur, outbound_id):
+            _finish_container_outbound(cur, outbound_id, now)
+            return False
         cur.execute(
             "UPDATE T_CKD SET F_CKDZT = ? WHERE F_ID = ? AND F_CKDZT = ?",
             (OUTBOUND_READY, outbound_id, AUDIT_PENDING),
         )
-        return
+        return True
     cur.execute(
         "UPDATE T_CKD SET F_CKDZT = ? WHERE F_ID = ? AND F_CKDZT = ?",
         (AUDIT_REJECT, outbound_id, AUDIT_PENDING),
@@ -360,6 +416,57 @@ def _review_outbound(cur, outbound_id: int, passed: bool) -> None:
         """,
         ("出库中", "在库", outbound_id, "已出库"),
     )
+    return False
+
+
+def _tubes_in_container(cur, tube_ids: List[int]) -> bool:
+    if not tube_ids:
+        return False
+    placeholders = ",".join(["?"] * len(tube_ids))
+    cur.execute(
+        f"SELECT COUNT(1) FROM T_YBFZ WHERE F_ID IN ({placeholders}) AND F_RQ_ID IS NOT NULL",
+        tuple(tube_ids),
+    )
+    return int(cur.fetchone()[0] or 0) > 0
+
+
+def _mark_tubes_in_stock(cur, tube_ids: List[int], now: str) -> None:
+    if not tube_ids:
+        return
+    placeholders = ",".join(["?"] * len(tube_ids))
+    cur.execute(
+        f"""
+        UPDATE T_YBFZ
+        SET F_YSZT = ?, F_JSSJ = ?, F_KCZT = ?, F_RKSJ = ?
+        WHERE F_ID IN ({placeholders})
+        """,
+        tuple(["已接收", now, "在库", now] + tube_ids),
+    )
+
+
+def _container_outbound(cur, outbound_id: int) -> bool:
+    cur.execute("SELECT F_CCWZ FROM T_YBFZ WHERE F_LOCK_CKD_ID = ?", (outbound_id,))
+    rows = cur.fetchall()
+    return bool(rows) and all(str(row[0] or "").strip() for row in rows)
+
+
+def _finish_container_outbound(cur, outbound_id: int, now: str) -> None:
+    cur.execute(
+        "UPDATE T_CKD SET F_CKDZT = ? WHERE F_ID = ? AND F_CKDZT = ?",
+        ("已出库", outbound_id, AUDIT_PENDING),
+    )
+    cur.execute(
+        "UPDATE T_CKD_MX SET F_MXZT = ?, F_CKSJ = ? WHERE F_CKD_ID = ?",
+        ("已出库", now, outbound_id),
+    )
+    cur.execute(
+        """
+        UPDATE T_YBFZ
+        SET F_KCZT = ?, F_CKSJ = ?, F_LOCK_CKD_ID = NULL
+        WHERE F_LOCK_CKD_ID = ?
+        """,
+        ("已出库", now, outbound_id),
+    )
 
 
 def _set_tube_transport(cur, tube_ids: List[int], status: str) -> None:
@@ -367,8 +474,12 @@ def _set_tube_transport(cur, tube_ids: List[int], status: str) -> None:
         return
     placeholders = ",".join(["?"] * len(tube_ids))
     cur.execute(
-        f"UPDATE T_YBFZ SET F_YSZT = ? WHERE F_ID IN ({placeholders}) AND F_YSZT = ?",
-        tuple([status] + tube_ids + [AUDIT_PENDING]),
+        f"""
+        UPDATE T_YBFZ SET F_YSZT = ?
+        WHERE F_ID IN ({placeholders})
+          AND (F_YSZT IS NULL OR F_YSZT = '' OR F_YSZT = ? OR F_YSZT = ?)
+        """,
+        tuple([status] + tube_ids + ["未运送", AUDIT_PENDING]),
     )
 
 
