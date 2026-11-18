@@ -62,7 +62,8 @@ def list_transport(payload: TransportListQuery, current_user: dict = Depends(get
 
 
 @router.post("/transport/detail", response_model=ApiResponse[TransportDetailResponse], response_model_exclude_none=True)
-def transport_detail(payload: TransportDetailQuery, current_user: dict = Depends(get_current_user_optional)):
+def transport_detail(payload: TransportDetailQuery, current_user: dict = Depends(get_current_user_silent)):
+    """外部接收软件按运输单号拉取详情，不带本系统 token。有 token 时仍按当前用户做数据权限。"""
     try:
         data = crud.get_transport_detail(payload.model_dump())
         from app.core.data_scope import deny_owner_access
