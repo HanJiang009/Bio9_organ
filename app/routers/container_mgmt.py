@@ -60,7 +60,7 @@ def detail(payload: ContainerId):
 @router.post("/tree", response_model=ApiResponse[dict], response_model_exclude_none=True,
              dependencies=_read)
 def tree(payload: ContainerTreeQuery):
-    """不传层架抽屉时返回整棵树。传 F_C、F_J、F_CT 后只返回该抽屉的盒子，管子位置在 F_WZ。"""
+    """不传层架抽屉时返回整棵树。传 F_C、F_J、F_CT 后只返回该抽屉的盒子。F_HZWZ 为容器名称/第N层/第N架/第N抽屉，管子孔位仍在 F_WZ。"""
     try:
         return ok(crud.container_tree(payload.model_dump()), "查询成功")
     except ValueError as exc:

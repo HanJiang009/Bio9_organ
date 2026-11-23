@@ -509,6 +509,21 @@ def delete_container(payload: Dict[str, Any], user: Dict[str, Any] | None = None
     return {"F_ID": rq_id}
 
 
+def _layer_label(item: Dict[str, Any], layer: int) -> str:
+    """层名称。没填时用第N层，和容器列表一致。"""
+    name = str(item.get("F_CMC") or "").strip()
+    return name or f"第{layer}层"
+
+
+def _drawer_location(container_name: Any, layer: int, rack: int, drawer: int) -> str:
+    """盒子所在抽屉：容器名称/第N层/第N架/第N抽屉。"""
+    parts = [f"第{layer}层", f"第{rack}架", f"第{drawer}抽屉"]
+    name = str(container_name or "").strip()
+    if name:
+        parts.insert(0, name)
+    return "/".join(parts)
+
+
 def container_tree(payload: Dict[str, Any]) -> Dict[str, Any]:
     """未指定抽屉时返回整棵层-架-抽屉-盒树。指定层、架、抽屉后只返回该抽屉的盒位。"""
     ensure_schema()
@@ -521,6 +536,7 @@ def container_tree(payload: Dict[str, Any]) -> Dict[str, Any]:
     layer_rows = load_layers(adapter, rq_id, row)
     layer_map = {int(item["F_C"]): item for item in layer_rows}
     tubes = occupied_tubes(adapter, rq_id)
+    container_name = row.get("F_RQMC") or row.get("F_RQBH")
     header = {
         "F_ID": rq_id,
         "F_RQBH": row.get("F_RQBH"),
@@ -544,14 +560,18 @@ def container_tree(payload: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("所选层、架或抽屉超出容器规格")
         header.update({
             "F_C": layer_no,
+            "F_CMC": _layer_label(spec, layer_no),
             "F_J": rack_no,
             "F_CT": drawer_no,
+            "F_HZWZ": _drawer_location(container_name, layer_no, rack_no, drawer_no),
             "F_HS": int(spec.get("F_HS") or 1),
             "F_LS": int(spec.get("F_LS") or 1),
-            "boxes": _boxes(tubes, layer_no, rack_no, drawer_no, int(spec["F_HXS"])),
+            "boxes": _boxes(
+                tubes, layer_no, rack_no, drawer_no, int(spec["F_HXS"]), container_name,
+            ),
         })
         return header
-    header["layers"] = [_tree_layer(item, tubes) for item in layer_rows]
+    header["layers"] = [_tree_layer(item, tubes, container_name) for item in layer_rows]
     return header
 
 
@@ -567,6 +587,7 @@ def _wz_sort_key(wz: str) -> Tuple[int, int]:
 def _tree_layer(
     item: Dict[str, Any],
     tubes: Dict[Tuple[int, int, int, int, str], Dict[str, Any]],
+    container_name: Any = "",
 ) -> Dict[str, Any]:
     layer = int(item["F_C"])
     rows = int(item.get("F_HS") or 1)
@@ -577,8 +598,12 @@ def _tree_layer(
         occupied = 0
         box_count = 0
         for drawer in range(1, int(item["F_CTS"]) + 1):
-            boxes = _boxes(tubes, layer, rack, drawer, int(item["F_HXS"]))
-            drawers.append({"F_CT": drawer, "boxes": boxes})
+            boxes = _boxes(tubes, layer, rack, drawer, int(item["F_HXS"]), container_name)
+            drawers.append({
+                "F_CT": drawer,
+                "F_HZWZ": _drawer_location(container_name, layer, rack, drawer),
+                "boxes": boxes,
+            })
             box_count += len(boxes)
             occupied += sum(len(box["tubes"]) for box in boxes)
         capacity = box_count * rows * cols
@@ -590,7 +615,7 @@ def _tree_layer(
         })
     return {
         "F_C": layer,
-        "F_CMC": item.get("F_CMC"),
+        "F_CMC": _layer_label(item, layer),
         "F_HS": int(item.get("F_HS") or 1),
         "F_LS": int(item.get("F_LS") or 1),
         "racks": racks,
@@ -603,6 +628,7 @@ def _boxes(
     rack: int,
     drawer: int,
     boxes: int,
+    container_name: Any = "",
 ) -> List[Dict[str, Any]]:
     grouped: Dict[int, List[Dict[str, Any]]] = {}
     for key, tube in tubes.items():
@@ -613,10 +639,19 @@ def _boxes(
             "F_SGBH": tube["F_SGBH"],
             "F_YBFZ_ID": tube["F_YBFZ_ID"],
         })
+    location = _drawer_location(container_name, layer, rack, drawer)
     result = []
     for box in range(1, boxes + 1):
         wells = sorted(grouped.get(box, []), key=lambda item: _wz_sort_key(item["F_WZ"]))
-        result.append({"F_H": box, "F_ZY": bool(wells), "tubes": wells})
+        result.append({
+            "F_H": box,
+            "F_C": layer,
+            "F_J": rack,
+            "F_CT": drawer,
+            "F_HZWZ": location,
+            "F_ZY": bool(wells),
+            "tubes": wells,
+        })
     return result
 
 
