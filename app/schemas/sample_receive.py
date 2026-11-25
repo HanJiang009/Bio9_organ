@@ -255,6 +255,7 @@ class YBZJListItem(BaseModel):
     F_XB: Optional[str] = None
     F_BRBH: Optional[str] = None
     F_ZYH: Optional[str] = None
+    F_SFZH: Optional[str] = Field(default=None, description="身份证号。电子病历地址仍由 F_DZBL 给出，此字段供前端自行拼链")
     F_DJRQ: Optional[str] = None
     F_CXSJ: Optional[str] = None
     F_ZQTYS_ID: Optional[str] = None

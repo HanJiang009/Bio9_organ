@@ -1,9 +1,31 @@
 """
 流水线管理模块 Schemas
 """
+import json
 from typing import Optional, List, Any, Dict, Union
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
+
+
+def _coerce_ybly(v: Any) -> Any:
+    """前端未选样本来源时会传空字符串。空值视为未填，单个字符串视为一项。"""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        text = v.strip()
+        if not text or text in ("[]", "null"):
+            return None
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return [text]
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()] or None
+        return [text]
+    if isinstance(v, list):
+        return v or None
+    return v
 
 
 # ==================== 节点 Schema ====================
@@ -36,6 +58,11 @@ class PipelineCreateIn(BaseModel):
     F_BZ: Optional[str] = Field(default=None, description="备注")
     F_DJR: Optional[str] = Field(default=None, description="登记人（由后端从当前用户自动填入）")
     nodes: Optional[List[PipelineNodeIn]] = Field(default=None, description="节点配置列表")
+
+    @field_validator("F_YBLY", mode="before")
+    @classmethod
+    def _ybly(cls, v: Any) -> Any:
+        return _coerce_ybly(v)
 
 
 class PipelineCreateOut(BaseModel):
@@ -71,6 +98,11 @@ class PipelineUpdateIn(BaseModel):
         default=None,
         description="需要删除的节点 F_ID 数组；与 nodes 更新同步执行，先删除再更新"
     )
+
+    @field_validator("F_YBLY", mode="before")
+    @classmethod
+    def _ybly(cls, v: Any) -> Any:
+        return _coerce_ybly(v)
 
 
 class PipelineUpdateOut(BaseModel):

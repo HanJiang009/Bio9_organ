@@ -1579,7 +1579,6 @@ FROM T_YBZJ y
         emr_cfg = load_emr_config()
         for it in items:
             it["F_DZBL"] = try_build_emr_url(it, emr_cfg)
-            it.pop("F_SFZH", None)
             it.pop("F_MZH", None)
             # F_BHG 语义映射：true -> 不合格，false -> 合格，pending -> 不合格审批中
             if it.get("F_BHG") is not None:
